@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local development when OAuth is implemented.
+# Do not put real secrets in this tracked example file.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+BOOTSTRAP_SECRET=
