@@ -236,3 +236,30 @@ h2 { margin: 12px 0; font-weight: 500; }
     margin-bottom: 0;
   }
 }
+
+
+/* Fixed sidebar with independently scrolling main content */
+@media (min-width: 641px) {
+  .app-shell {
+    min-height: 100vh;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 250px;
+    height: 100vh;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    box-sizing: border-box;
+  }
+
+  .main-content {
+    grid-column: 2;
+    min-width: 0;
+    margin-left: 250px;
+  }
+}
