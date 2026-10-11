@@ -10,7 +10,7 @@ run_worker_first = ["/api/*"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "jarvis-portal-db"
+database_name = "scratch-portal-db"
 database_id = "66574faa-06ae-412d-9244-d44003014964"
 migrations_dir = "migrations"
 
