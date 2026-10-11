@@ -94,3 +94,55 @@ h2 { margin: 12px 0; font-weight: 500; }
   .footer { font-size: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }
+
+/* Account access */
+.account-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 28px;
+  margin-top: 20px;
+  padding: 25px 28px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(120deg, #101c2d, #0c1524);
+}
+
+.account-copy { min-width: 0; }
+.account-copy h2 { margin: 8px 0; font-size: 21px; }
+.account-copy p { margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.account-actions { flex: 0 0 auto; }
+.google-button, .secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 11px 17px;
+  border: 1px solid #34445b;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.google-button { background: #e8f0fc; color: #172238; }
+.google-button:hover { background: #fff; border-color: var(--cyan); }
+.google-mark { font-family: Arial, sans-serif; font-size: 19px; font-weight: 700; color: #4285f4; }
+.secondary-button { margin-top: 13px; background: #152238; color: var(--text); }
+.secondary-button:hover { border-color: var(--cyan); background: #1a2b42; }
+.secondary-button:disabled { opacity: .6; cursor: wait; }
+.account-identity { display: flex; align-items: center; gap: 11px; }
+.account-identity strong, .account-identity span { display: block; }
+.account-identity strong { max-width: 220px; overflow-wrap: anywhere; font-size: 13px; }
+.account-identity div > span { margin-top: 4px; color: var(--cyan); font-size: 10px; letter-spacing: .08em; }
+.account-avatar { display: grid !important; place-items: center; width: 38px; height: 38px; border: 1px solid #3c728b; border-radius: 50%; color: var(--cyan); background: #102a3b; font-size: 17px; }
+.auth-message { color: var(--amber) !important; }
+[hidden] { display: none !important; }
+
+@media (max-width: 760px) {
+  .account-panel { align-items: stretch; flex-direction: column; gap: 20px; padding: 22px; }
+  .account-actions { width: 100%; }
+  .google-button { width: 100%; }
+}

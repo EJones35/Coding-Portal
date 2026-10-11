@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 import worker from "../src/server/index.js";
 
@@ -14,7 +14,7 @@ test("health endpoint returns a successful JSON response", async () => {
   assert.deepEqual(await response.json(), {
     status: "ok",
     service: "coding-sessions-portal-api",
-    stage: "foundation"
+    stage: "google-authentication"
   });
 });
 
@@ -42,4 +42,38 @@ test("non-API requests are passed to the configured static asset binding", async
 test("missing static asset binding fails safely", async () => {
   const response = await worker.fetch(makeRequest("/"), {});
   assert.equal(response.status, 503);
+});
+
+
+
+
+test("account endpoint returns a signed-out state without a database", async () => {
+  const response = await worker.fetch(makeRequest("/api/auth/me"), {});
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { user: null });
+});
+
+test("Google sign-in fails safely when configuration is missing", async () => {
+  const response = await worker.fetch(makeRequest("/api/auth/google"), {});
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "Google sign-in is not configured"
+  });
+});
+
+test("Google callback fails safely when configuration is missing", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/auth/google/callback"),
+    {}
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: "Google sign-in is not configured"
+  });
+});
+
+test("logout rejects methods other than POST", async () => {
+  const response = await worker.fetch(makeRequest("/api/auth/logout"), {});
+  assert.equal(response.status, 405);
+  assert.deepEqual(await response.json(), { error: "Method not allowed" });
 });

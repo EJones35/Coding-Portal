@@ -1,10 +1,10 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#080d18">
-  <meta name="description" content="Coding Sessions Portal ? coding sessions, attendance and achievements.">
+  <meta name="description" content="Coding Sessions Portal — coding sessions, attendance and achievements.">
   <title>Coding Sessions Portal</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -26,32 +26,88 @@
         <a class="nav-item disabled" href="#achievements" aria-disabled="true"><span aria-hidden="true">◇</span> Achievements <small>COMING SOON</small></a>
         <a class="nav-item disabled" href="#profile" aria-disabled="true"><span aria-hidden="true">◎</span> My profile <small>COMING SOON</small></a>
       </nav>
-      <div class="sidebar-bottom"><span class="status-dot"></span> FOUNDATION ONLINE <span class="version">v0.1.0</span></div>
+      <div class="sidebar-bottom"><span class="status-dot"></span> PORTAL ONLINE <span class="version">v0.1.0</span></div>
     </aside>
 
     <main class="main-content" id="home">
       <header class="topbar">
-        <div><div class="eyebrow">CODING SESSIONS / PORTAL</div><h1>Overview</h1></div>
+        <div>
+          <div class="eyebrow">CODING SESSIONS / PORTAL</div>
+          <h1>Overview</h1>
+        </div>
         <div class="environment"><span class="status-dot"></span> DEVELOPMENT BUILD</div>
       </header>
 
       <section class="welcome-panel" aria-labelledby="welcome-title">
         <div class="welcome-copy">
-          <div class="eyebrow accent">SYSTEM INITIALISATION</div>
+          <div class="eyebrow accent">YOUR CODING WORKSPACE</div>
           <h2 id="welcome-title">Your next chapter<br>starts here.</h2>
-          <p>The Coding Sessions Portal foundation is running. Authentication, sessions and progression features will be brought online in the next implementation stages.</p>
-          <div class="status-line"><span class="status-dot"></span><span id="api-status">Checking API connection…</span></div>
+          <p>Sign in to access your coding sessions, track your attendance and see the achievements you earn along the way.</p>
+          <div class="status-line"><span class="status-dot"></span><span id="api-status" role="status">Connecting to portal services…</span></div>
         </div>
-        <div class="orbital" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit-core">C</div><span class="orbit-node"></span></div>
+        <div class="orbital" aria-hidden="true">
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="orbit-core">C</div>
+          <span class="orbit-node"></span>
+        </div>
       </section>
 
-      <section class="section-heading"><div><div class="eyebrow">YOUR WORKSPACE</div><h2>Portal modules</h2></div><span class="section-note">FEATURES ENABLED AS BUILT</span></section>
-      <section class="module-grid" aria-label="Portal modules">
-        <article class="module-card"><div class="module-icon cyan">◎</div><div class="module-title">Personal profile</div><p>Your profile, sign-in methods and preferences.</p><span class="module-state"><span class="state-indicator"></span> IN DEVELOPMENT</span></article>
-        <article class="module-card"><div class="module-icon violet">▦</div><div class="module-title">Sessions</div><p>Find sessions made available to your account.</p><span class="module-state"><span class="state-indicator"></span> IN DEVELOPMENT</span></article>
-        <article class="module-card"><div class="module-icon amber">◇</div><div class="module-title">Achievements</div><p>View earned achievements and badges.</p><span class="module-state"><span class="state-indicator"></span> IN DEVELOPMENT</span></article>
+      <section class="account-panel" aria-labelledby="account-title">
+        <div class="account-copy">
+          <div class="eyebrow accent">ACCOUNT ACCESS</div>
+          <h2 id="account-title">Welcome to your portal</h2>
+          <p id="account-message">Sign in with your Google account to get started.</p>
+          <p id="auth-message" class="auth-message" role="status" aria-live="polite" hidden></p>
+        </div>
+        <div class="account-actions">
+          <a class="google-button" id="google-sign-in" href="/api/auth/google">
+            <span class="google-mark" aria-hidden="true">G</span>
+            Continue with Google
+          </a>
+          <div id="signed-in-actions" hidden>
+            <div class="account-identity">
+              <span class="account-avatar" id="account-avatar" aria-hidden="true">C</span>
+              <div>
+                <strong id="account-name">Account</strong>
+                <span id="account-role">Member</span>
+              </div>
+            </div>
+            <button class="secondary-button" id="sign-out" type="button">Sign out</button>
+          </div>
+        </div>
       </section>
-      <footer class="footer"><span>CODING SESSIONS PORTAL</span><span>SECURE BY DESIGN · BUILT IN STAGES</span></footer>
+
+      <section class="section-heading">
+        <div><div class="eyebrow">YOUR WORKSPACE</div><h2>Portal modules</h2></div>
+        <span class="section-note">FEATURES ENABLED AS BUILT</span>
+      </section>
+
+      <section class="module-grid" aria-label="Portal modules">
+        <article class="module-card">
+          <div class="module-icon cyan">◎</div>
+          <div class="module-title">Personal profile</div>
+          <p>Your profile, sign-in methods and preferences.</p>
+          <span class="module-state"><span class="state-indicator"></span> IN DEVELOPMENT</span>
+        </article>
+        <article class="module-card">
+          <div class="module-icon violet">▦</div>
+          <div class="module-title">Sessions</div>
+          <p>Find sessions made available to your account.</p>
+          <span class="module-state"><span class="state-indicator"></span> IN DEVELOPMENT</span>
+        </article>
+        <article class="module-card">
+          <div class="module-icon amber">◇</div>
+          <div class="module-title">Achievements</div>
+          <p>View earned achievements and badges.</p>
+          <span class="module-state"><span class="state-indicator"></span> IN DEVELOPMENT</span>
+        </article>
+      </section>
+
+      <footer class="footer">
+        <span>CODING SESSIONS PORTAL</span>
+        <span>SECURE BY DESIGN · BUILT IN STAGES</span>
+      </footer>
     </main>
   </div>
 </body>
