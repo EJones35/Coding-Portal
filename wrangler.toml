@@ -11,7 +11,7 @@ run_worker_first = ["/api/*"]
 [[d1_databases]]
 binding = "DB"
 database_name = "jarvis-portal-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "66574faa-06ae-412d-9244-d44003014964"
 migrations_dir = "migrations"
 
 # OAuth secrets will be added with `wrangler secret put` in a later stage.
