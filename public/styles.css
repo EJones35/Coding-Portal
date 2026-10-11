@@ -198,3 +198,41 @@ h2 { margin: 12px 0; font-weight: 500; }
   }
   .sidebar-account .google-button { width: 100%; }
 }
+
+
+
+/* Minimal bottom-pinned sidebar account */
+.sidebar-account {
+  margin-top: auto !important;
+  margin-bottom: 10px;
+}
+
+.sidebar-account + .sidebar-bottom {
+  margin-top: 0;
+}
+
+.sidebar-account .eyebrow,
+.sidebar-account h2,
+.sidebar-account #account-message {
+  display: none !important;
+}
+
+.sidebar-account .account-copy {
+  display: none;
+}
+
+.sidebar-account .account-actions {
+  margin-top: 0;
+}
+
+.sidebar-account #signed-in-actions {
+  display: grid;
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .sidebar-account {
+    margin-top: 14px !important;
+    margin-bottom: 0;
+  }
+}
