@@ -22,7 +22,7 @@ export default {
 
       return json({
         status: "ok",
-        service: "jarvis-portal-api",
+        service: "coding-sessions-portal-api",
         stage: "foundation"
       });
     }
@@ -35,7 +35,7 @@ export default {
       return env.ASSETS.fetch(request);
     }
 
-    return new Response("JARVIS Portal assets are not configured.", {
+    return new Response("Coding Sessions Portal assets are not configured.", {
       status: 503,
       headers: { "content-type": "text/plain; charset=utf-8" }
     });

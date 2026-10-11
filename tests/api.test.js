@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import worker from "../src/server/index.js";
 
 function makeRequest(path, method = "GET") {
-  return new Request(`https://jarvis.example${path}`, { method });
+  return new Request(`https://coding-sessions.example${path}`, { method });
 }
 
 test("health endpoint returns a successful JSON response", async () => {
@@ -13,7 +13,7 @@ test("health endpoint returns a successful JSON response", async () => {
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.deepEqual(await response.json(), {
     status: "ok",
-    service: "jarvis-portal-api",
+    service: "coding-sessions-portal-api",
     stage: "foundation"
   });
 });

@@ -1,6 +1,6 @@
-# JARVIS Portal
+# Coding Sessions Portal
 
-JARVIS is an online progression and session portal. This repository currently contains **Stage 1: Foundation**. Authentication, profile editing, uploads, groups, sessions, attendance, achievements, XP, levels and administrator workflows are not implemented yet.
+Coding Sessions Portal is a website for coding sessions, attendance, profiles and achievements. This repository currently contains **Stage 1: Foundation**. Authentication, profile editing, uploads, groups, sessions, attendance, achievements, XP, levels and administrator workflows are not implemented yet.
 
 ## Stack
 
@@ -38,7 +38,7 @@ The first migration creates the core user, external identity, server session, au
 Create the database in your Cloudflare account:
 
 ```sh
-npx wrangler d1 create jarvis-portal-db
+npx wrangler d1 create scratch-portal-db
 ```
 
 Copy the returned database ID into `wrangler.toml`, replacing `REPLACE_WITH_YOUR_D1_DATABASE_ID`. Do not commit credentials or secrets. Then apply the migration locally:
