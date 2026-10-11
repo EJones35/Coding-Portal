@@ -260,6 +260,6 @@ h2 { margin: 12px 0; font-weight: 500; }
   .main-content {
     grid-column: 2;
     min-width: 0;
-    margin-left: 250px;
+    margin-left: 0;
   }
 }
