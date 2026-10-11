@@ -26,6 +26,30 @@
         <a class="nav-item disabled" href="#achievements" aria-disabled="true"><span aria-hidden="true">◇</span> Achievements <small>COMING SOON</small></a>
         <a class="nav-item disabled" href="#profile" aria-disabled="true"><span aria-hidden="true">◎</span> My profile <small>COMING SOON</small></a>
       </nav>
+      <section class="account-panel sidebar-account" aria-labelledby="account-title">
+        <div class="account-copy">
+          <div class="eyebrow accent">ACCOUNT</div>
+          <h2 id="account-title">Your account</h2>
+          <p id="account-message">Sign in to get started.</p>
+          <p id="auth-message" class="auth-message" role="status" aria-live="polite" hidden></p>
+        </div>
+        <div class="account-actions">
+          <a class="google-button" id="google-sign-in" href="/api/auth/google">
+            <span class="google-mark" aria-hidden="true">G</span>
+            Sign in with Google
+          </a>
+          <div id="signed-in-actions" hidden>
+            <div class="account-identity">
+              <span class="account-avatar" id="account-avatar" aria-hidden="true">C</span>
+              <div>
+                <strong id="account-name">Account</strong>
+                <span id="account-role">Member</span>
+              </div>
+            </div>
+            <button class="secondary-button" id="sign-out" type="button">Sign out</button>
+          </div>
+        </div>
+      </section>
       <div class="sidebar-bottom"><span class="status-dot"></span> PORTAL ONLINE <span class="version">v0.1.0</span></div>
     </aside>
 
@@ -53,30 +77,7 @@
         </div>
       </section>
 
-      <section class="account-panel" aria-labelledby="account-title">
-        <div class="account-copy">
-          <div class="eyebrow accent">ACCOUNT ACCESS</div>
-          <h2 id="account-title">Welcome to your portal</h2>
-          <p id="account-message">Sign in with your Google account to get started.</p>
-          <p id="auth-message" class="auth-message" role="status" aria-live="polite" hidden></p>
-        </div>
-        <div class="account-actions">
-          <a class="google-button" id="google-sign-in" href="/api/auth/google">
-            <span class="google-mark" aria-hidden="true">G</span>
-            Continue with Google
-          </a>
-          <div id="signed-in-actions" hidden>
-            <div class="account-identity">
-              <span class="account-avatar" id="account-avatar" aria-hidden="true">C</span>
-              <div>
-                <strong id="account-name">Account</strong>
-                <span id="account-role">Member</span>
-              </div>
-            </div>
-            <button class="secondary-button" id="sign-out" type="button">Sign out</button>
-          </div>
-        </div>
-      </section>
+
 
       <section class="section-heading">
         <div><div class="eyebrow">YOUR WORKSPACE</div><h2>Portal modules</h2></div>

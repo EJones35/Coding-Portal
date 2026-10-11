@@ -146,3 +146,55 @@ h2 { margin: 12px 0; font-weight: 500; }
   .account-actions { width: 100%; }
   .google-button { width: 100%; }
 }
+
+
+/* Compact account access anchored to the sidebar bottom */
+.sidebar-account {
+  display: block;
+  margin-top: auto;
+  margin-bottom: 14px;
+  padding: 14px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(16, 35, 56, .48);
+}
+.sidebar-account .account-copy { min-width: 0; }
+.sidebar-account .eyebrow { font-size: 9px; }
+.sidebar-account h2 {
+  margin: 7px 0 5px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.sidebar-account p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.sidebar-account .account-actions { margin-top: 12px; }
+.sidebar-account .google-button {
+  width: 100%;
+  min-height: 38px;
+  justify-content: center;
+  padding: 9px 7px;
+  font-size: 11px;
+}
+.sidebar-account #signed-in-actions { display: grid; gap: 12px; }
+.sidebar-account .account-identity { gap: 9px; min-width: 0; }
+.sidebar-account .account-identity > div { min-width: 0; }
+.sidebar-account .account-identity strong,
+.sidebar-account .account-identity span {
+  overflow-wrap: anywhere;
+}
+.sidebar-account .secondary-button { width: 100%; }
+.sidebar-account[hidden],
+.sidebar-account #signed-in-actions[hidden],
+.sidebar-account #google-sign-in[hidden] { display: none !important; }
+
+@media (max-width: 640px) {
+  .sidebar-account {
+    margin-top: 14px;
+    margin-bottom: 0;
+  }
+  .sidebar-account .google-button { width: 100%; }
+}
