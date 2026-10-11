@@ -1,0 +1,18 @@
+name = "jarvis-portal"
+main = "src/server/index.js"
+compatibility_date = "2026-10-11"
+workers_dev = true
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "jarvis-portal-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# OAuth secrets will be added with `wrangler secret put` in a later stage.
+# Never put client secrets or tokens in this file or in source control.
