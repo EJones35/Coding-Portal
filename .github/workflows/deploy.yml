@@ -26,7 +26,11 @@ jobs:
   check:
     name: Check and deploy
     runs-on: ubuntu-latest
-    environment: production
+    # No `environment:` key here. Referencing one requires `deployments: write`,
+    # and this workflow only needs read access to the repository. When you want
+    # a protected production environment with required reviewers, add
+    # `environment: production` here and `deployments: write` to permissions at
+    # the same time.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
