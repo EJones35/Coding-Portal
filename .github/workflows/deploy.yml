@@ -1,8 +1,27 @@
 name: Deploy
 
+# Pushes to main are checked, migrated and deployed to Cloudflare Workers.
+#
+# Uses the project's own pinned Wrangler from package-lock rather than a
+# third-party action, so nothing outside this repository ever runs with access
+# to the Cloudflare token.
+#
+# Migrations run before the Worker is published. Every migration in this
+# repository is additive only: CREATE TABLE, CREATE INDEX, or ADD COLUMN with a
+# default or a nullable value. A migration that drops or rewrites existing data
+# must not be merged without reading this file, because it will be applied to
+# production automatically the moment it lands on main.
+
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
+# A queued run waits for the one in front of it rather than cancelling it
+# halfway through a migration.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -11,10 +30,56 @@ jobs:
   check:
     name: Check and deploy
     runs-on: ubuntu-latest
+
+    # No `environment:` key. Referencing one requires `deployments: write`, and
+    # this workflow only needs to read the repository. When you want a
+    # protected production environment with required reviewers, add
+    # `environment: production` here and `deployments: write` to permissions in
+    # the same commit.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Guard probe
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
-        run: echo "token is present"
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: npm run check
+
+      # 87 tests, run against real SQLite through a D1-compatible adapter.
+      # Nothing reaches Cloudflare if these fail.
+      - name: Unit tests
+        run: npm test
+
+      # The token guard is done in the shell rather than with an `if:` on the
+      # step. GitHub rejected the equivalent `if: ${{ secrets... != '' }}`
+      # expression for this workflow, and a shell check is easier to read and
+      # to reason about anyway: missing credentials are a notice, never a
+      # failed build.
+      - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::notice title=Deploy skipped::No CLOUDFLARE_API_TOKEN secret, so migrations were not applied."
+            exit 0
+          fi
+          npx wrangler d1 migrations apply scratch-portal-db --remote
+
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::notice title=Deploy skipped::No CLOUDFLARE_API_TOKEN secret, so nothing was published."
+            exit 0
+          fi
+          npx wrangler deploy
