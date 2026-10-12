@@ -512,12 +512,17 @@ async function showBlockNotice(error, fallback) {
   showNotice(headline + (reason ? " Reason: " + reason : " Please contact an administrator."), true);
 }
 
+// ASCII on purpose. This mask is generated from user data at runtime, and a
+// non-ASCII character here can be destroyed by any editor that round-trips the
+// file through a legacy code page - which is exactly what happened once.
 function maskEmail(value) {
   const trimmed = String(value || "").trim();
   if (!trimmed.includes("@")) return "";
 
   const local = trimmed.slice(0, trimmed.indexOf("@"));
-  return `${local.slice(0, 1)}${"â€¢".repeat(Math.min(4, Math.max(2, local.length - 1)))}@â€¢â€¢â€¢â€¢â€¢â€¢`;
+  return local.slice(0, 1) +
+    "*".repeat(Math.min(4, Math.max(2, local.length - 1))) +
+    "@" + "*".repeat(6);
 }
 
 googleSignIn.addEventListener("click", event => {
@@ -2029,7 +2034,7 @@ function applyAccess(item, access, panel) {
       parts.push(`${access.groups.length} ${access.groups.length === 1 ? "group" : "groups"}: ` +
         access.groups.map(group => group.name).join(", "));
     }
-    summary.textContent = "Locked to " + parts.join(" Â· ");
+    summary.textContent = "Locked to " + parts.join("  -  ");
   }
 
   const cached = sessionsCache.find(entry => entry.id === item.id);

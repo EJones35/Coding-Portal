@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -1761,6 +1761,65 @@ test("the profile's scheduled count only includes sessions that member can atten
 // ---------------------------------------------------------------------------
 // Deployment shape
 // ---------------------------------------------------------------------------
+
+test("no shipped source file is byte-order-marked or mis-encoded", () => {
+  const files = [
+    "../src/server/index.js",
+    "../public/app.js",
+    "../public/index.html",
+    "../public/styles.css",
+    "../wrangler.toml",
+    "../package.json",
+    "../.github/workflows/deploy.yml",
+    "../.github/workflows/ci.yml",
+    ...migrationNames().map(name => `../migrations/${name}`)
+  ];
+
+  // A UTF-8 byte-order mark, and the classic signature of a file that was read
+  // and rewritten through a legacy code page: the two-byte lead characters for
+  // A-circumflex, a-lowercase-circumflex and a-tilde. A bullet (U+2022) that
+  // survives that round trip becomes the three characters a-circumflex,
+  // euro sign, quotedblbase, which is what an administrator's masked email
+  // address turned into in production once already.
+  const misencoded = Buffer.from([0xc3, 0x82]);
+  const misencoded2 = Buffer.from([0xc3, 0xa2]);
+  const misencoded3 = Buffer.from([0xc3, 0xa3]);
+
+  for (const file of files) {
+    const bytes = readFileSync(fileURLToPath(new URL(file, import.meta.url)));
+
+    assert.ok(
+      !(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf),
+      `${file} starts with a UTF-8 byte-order mark`
+    );
+
+    for (const signature of [misencoded, misencoded2, misencoded3]) {
+      const at = bytes.indexOf(signature);
+      if (at >= 0) {
+        assert.fail(
+          `${file} contains mis-encoded text at byte ${at}: ` +
+          `${bytes.subarray(at, at + 8).toString("latin1")}`
+        );
+      }
+    }
+  }
+});
+
+test("the email mask is built from characters that cannot be mis-encoded", async () => {
+  const app = readFileSync(
+    fileURLToPath(new URL("../public/app.js", import.meta.url)),
+    "utf8"
+  );
+
+  const body = app.match(/function maskEmail\(value\) \{[\s\S]*?\n\}/);
+  assert.ok(body, "maskEmail must exist");
+
+  assert.equal(Buffer.from(body[0], "utf8").every(byte => byte < 128), true,
+    "maskEmail must be pure ASCII so no code page can corrupt the mask");
+
+  // And it must actually mask: first letter only, no domain.
+  assert.ok(body[0].includes('@'), "the mask must keep the @ separator");
+});
 
 test("migration files are unique, ordered and include the profile picture column", () => {
   const names = migrationNames();

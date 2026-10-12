@@ -1,2 +1,2 @@
-﻿ALTER TABLE oauth_transactions
+ALTER TABLE oauth_transactions
 ADD COLUMN nonce TEXT;

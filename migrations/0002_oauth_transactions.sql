@@ -1,4 +1,4 @@
-﻿CREATE TABLE oauth_transactions (
+CREATE TABLE oauth_transactions (
   state_hash TEXT PRIMARY KEY,
   provider TEXT NOT NULL CHECK (provider IN ('google', 'discord')),
   code_verifier TEXT NOT NULL,

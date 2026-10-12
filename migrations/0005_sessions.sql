@@ -1,4 +1,4 @@
-﻿CREATE TABLE coding_sessions (
+CREATE TABLE coding_sessions (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 120),
   description TEXT NOT NULL DEFAULT '',

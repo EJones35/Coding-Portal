@@ -1,4 +1,4 @@
-﻿name = "coding-sessions-portal"
+name = "coding-sessions-portal"
 main = "src/server/index.js"
 compatibility_date = "2026-10-11"
 workers_dev = true
