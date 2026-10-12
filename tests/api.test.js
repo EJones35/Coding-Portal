@@ -77,3 +77,105 @@ test("logout rejects methods other than POST", async () => {
   assert.equal(response.status, 405);
   assert.deepEqual(await response.json(), { error: "Method not allowed" });
 });
+
+test("admin overview rejects unauthenticated requests", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/admin/overview"),
+    {}
+  );
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "Authentication required"
+  });
+});
+
+test("admin user list rejects unauthenticated requests", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/admin/users"),
+    {}
+  );
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "Authentication required"
+  });
+});
+
+test("admin audit log rejects unauthenticated requests", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/admin/audit"),
+    {}
+  );
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "Authentication required"
+  });
+});
+
+test("admin user updates reject unauthenticated requests", async () => {
+  const response = await worker.fetch(
+    new Request("https://coding-sessions.example/api/admin/users/test-user", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: "admin" })
+    }),
+    {}
+  );
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "Authentication required"
+  });
+});
+
+test("sessions endpoint rejects unauthenticated requests", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/sessions"),
+    {}
+  );
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "Authentication required"
+  });
+});
+
+test("sessions endpoint rejects methods other than GET", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/sessions", "POST"),
+    {}
+  );
+
+  assert.equal(response.status, 405);
+  assert.deepEqual(await response.json(), {
+    error: "Method not allowed"
+  });
+});
+
+test("admin sessions endpoint rejects unauthenticated requests", async () => {
+  const response = await worker.fetch(
+    makeRequest("/api/admin/sessions"),
+    {}
+  );
+
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    error: "Authentication required"
+  });
+});
+
+test("account profile updates require authentication", async () => {
+  const response = await worker.fetch(makeRequest("/api/account/profile", "PATCH"), {});
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "Authentication required" });
+});
+
+test("account deletion requires authentication", async () => {
+  const response = await worker.fetch(makeRequest("/api/account", "DELETE"), {});
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "Authentication required" });
+});
+
+test("profile picture upload requires authentication", async () => {
+  const response = await worker.fetch(makeRequest("/api/account/profile-picture", "PUT"), {});
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "Authentication required" });
+});

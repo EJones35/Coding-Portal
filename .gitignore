@@ -8,3 +8,13 @@ coverage/
 playwright-report/
 test-results/
 .DS_Store
+
+# Scratch artefacts from earlier working sessions: pre-edit snapshots, one-off
+# fix scripts and dated backup copies. Kept on disk, never published.
+*.bak
+*.admin-backup
+*.pre-*
+backup-before-*/
+.fix-admin-navigation.cjs
+update-admin.mjs
+.admin-search-check.sql

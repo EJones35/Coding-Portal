@@ -9,6 +9,11 @@ const SESSION_SECONDS = 7 * 24 * 60 * 60;
 const OAUTH_SECONDS = 10 * 60;
 const ADMIN_EMAIL = "ethan@garyjones.co.uk";
 
+// Profile pictures are stored inline in D1, so the accepted payload is small.
+// Enforced again on the client; both limits must stay in step.
+const MAX_PICTURE_BYTES = 350 * 1024;
+const MAX_PICTURE_REQUEST_BYTES = 500 * 1024;
+
 let cachedGoogleKeys = null;
 let cachedGoogleKeysAt = 0;
 
@@ -116,6 +121,40 @@ function homeRedirect(request, error) {
   const target = new URL("/", request.url);
   if (error) target.searchParams.set("auth_error", error);
   return target;
+}
+
+// A blocked sign-in needs to carry its reason back to the page without putting
+// it in the URL, where it would sit in history and in any referrer. HttpOnly
+// cookie, read once by GET /api/auth/blocked and cleared in the same response.
+function setBlockedCookie(request, status, reason) {
+  const payload = base64url(
+    new TextEncoder().encode(`${status}:${String(reason || "").slice(0, 500)}`)
+  );
+
+  return setCookie(request, "csp_blocked", payload, {
+    httpOnly: true,
+    maxAge: 300
+  });
+}
+
+function readBlockedCookie(request) {
+  const raw = cookies(request)[cookieName(request, "csp_blocked")];
+  if (!raw || raw.length > 2000) return null;
+
+  let decoded = "";
+  try {
+    decoded = new TextDecoder().decode(decodeBase64url(raw));
+  } catch {
+    return null;
+  }
+
+  const separator = decoded.indexOf(":");
+  if (separator < 1) return null;
+
+  return {
+    status: decoded.slice(0, separator),
+    reason: decoded.slice(separator + 1)
+  };
 }
 
 function safeRedirectPath(value) {
@@ -240,9 +279,7 @@ async function getCurrentSession(request, env) {
   const result = await env.DB.prepare(`
     SELECT
       s.id_hash, s.csrf_token_hash, s.expires_at,
-      u.id, u.provider_name, u.preferred_name, u.display_name_override,
-      u.profile_picture_key, u.role, u.status, u.created_at,
-      u.last_sign_in_at
+      ${publicUserColumns("u")}
     FROM server_sessions s
     JOIN users u ON u.id = s.user_id
     WHERE s.id_hash = ?
@@ -281,12 +318,43 @@ async function requireCsrf(request, session) {
   return true;
 }
 
+// One shared projection for the user shape returned to the browser. `{p}` is
+// replaced with an optional table alias so the session join and the standalone
+// user lookup can never drift apart.
+const USER_PUBLIC_COLUMNS = `{p}id, {p}provider_name, {p}preferred_name,
+  {p}display_name_override, {p}status, {p}role,
+  ({p}profile_picture_data IS NOT NULL) AS has_profile_picture,
+  length({p}profile_picture_data) AS profile_picture_length,
+  {p}created_at, {p}updated_at, {p}last_sign_in_at`;
+
+function publicUserColumns(prefix = "") {
+  return USER_PUBLIC_COLUMNS.replaceAll("{p}", prefix ? `${prefix}.` : "");
+}
+
+// The picture itself never leaves D1 as a data URL. Clients receive a
+// versioned URL for an authenticated image endpoint instead. The version is
+// derived from the row so it changes exactly when the stored image changes,
+// which is what stops a browser reusing a decoded, obsolete picture.
+function profilePictureVersion(row) {
+  const stamp = String(row.updated_at || "").replace(/[^0-9]/g, "");
+  return `${stamp}-${Number(row.profile_picture_length) || 0}`;
+}
+
+function avatarUrl(row) {
+  return `/api/avatars/${encodeURIComponent(row.id)}` +
+    `?v=${encodeURIComponent(profilePictureVersion(row))}`;
+}
+
 function publicUser(row) {
+  const hasPicture = Boolean(row.has_profile_picture);
+
   return {
     id: row.id,
     name: row.display_name_override || row.preferred_name || row.provider_name || "User",
     role: row.role,
-    profilePictureKey: row.profile_picture_key,
+    status: row.status,
+    hasProfilePicture: hasPicture,
+    avatarUrl: hasPicture ? avatarUrl(row) : null,
     createdAt: row.created_at,
     lastSignInAt: row.last_sign_in_at
   };
@@ -459,6 +527,34 @@ async function completeGoogle(request, env) {
     `).bind(userId).run();
   }
 
+  // An account that has been suspended or marked for deletion must not be
+  // handed a session. Before this check a suspended member was signed out and
+  // could simply sign back in, which made suspension meaningless.
+  const account = await env.DB.prepare(
+    "SELECT id, status, status_reason FROM users WHERE id = ?"
+  ).bind(userId).first();
+
+  if (account && account.status !== "active") {
+    await env.DB.prepare(`
+      INSERT INTO audit_log (id, actor_user_id, action, target_type, target_id, details_json)
+      VALUES (?, ?, 'auth.sign_in.blocked', 'user', ?, ?)
+    `).bind(
+      randomToken(18),
+      userId,
+      userId,
+      JSON.stringify({ status: account.status })
+    ).run();
+
+    return redirectResponse(
+      homeRedirect(request, `account_${account.status}`),
+      request,
+      [
+        setCookie(request, "csp_oauth_browser", "", { maxAge: 0, httpOnly: true }),
+        setBlockedCookie(request, account.status, account.status_reason)
+      ]
+    );
+  }
+
   // The one-time bootstrap can only be triggered by the verified configured email.
   if (identity.email === ADMIN_EMAIL) {
     await env.DB.prepare(`
@@ -549,6 +645,1418 @@ async function logout(request, env) {
   });
 }
 
+
+async function handleAccountApi(request, env, url) {
+  const session = await getCurrentSession(request, env);
+  if (!session) return json({ error: "Authentication required" }, 401);
+
+  async function currentUserRow() {
+    return env.DB.prepare(
+      `SELECT ${publicUserColumns()} FROM users WHERE id = ?`
+    ).bind(session.id).first();
+  }
+
+  if (url.pathname === "/api/account" && request.method === "GET") {
+    return json({ user: publicUser(await currentUserRow()) });
+  }
+
+  if (url.pathname === "/api/account/profile" && request.method === "PATCH") {
+    if (!(await requireCsrf(request, session))) {
+      return json({ error: "Security token invalid. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid request" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return json({ error: "Invalid request" }, 400);
+    }
+
+    // The target is always the signed-in account. A caller-supplied user id is
+    // refused outright rather than quietly ignored.
+    if (body.userId !== undefined || body.id !== undefined) {
+      return json({ error: "You can only change your own profile" }, 403);
+    }
+
+    if (typeof body.displayName !== "string") {
+      return json({ error: "Enter a display name" }, 400);
+    }
+
+    const displayName = body.displayName.trim();
+
+    if (displayName.length < 1 || displayName.length > 80) {
+      return json({ error: "Display name must be between 1 and 80 characters" }, 400);
+    }
+
+    await env.DB.prepare(`
+      UPDATE users
+      SET display_name_override = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(displayName, session.id).run();
+
+    await writeAudit(env, session.id, "account.profile.updated", session.id, {
+      displayName
+    });
+
+    return json({ ok: true, user: publicUser(await currentUserRow()) });
+  }
+
+  if (url.pathname === "/api/account/profile-picture" && request.method === "PUT") {
+    if (!(await requireCsrf(request, session))) {
+      return json({ error: "Security token invalid. Refresh and try again." }, 403);
+    }
+
+    const declaredLength = Number(request.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_PICTURE_REQUEST_BYTES) {
+      return json({ error: "Choose an image smaller than 350 KB" }, 413);
+    }
+
+    let form;
+    try {
+      form = await request.formData();
+    } catch {
+      return json({ error: "Choose a valid image file" }, 400);
+    }
+
+    const file = form.get("picture");
+
+    if (!file || typeof file !== "object" || typeof file.arrayBuffer !== "function") {
+      return json({ error: "Choose an image file" }, 400);
+    }
+
+    if (!Number.isFinite(file.size) || file.size < 1) {
+      return json({ error: "That file is empty" }, 400);
+    }
+
+    if (file.size > MAX_PICTURE_BYTES) {
+      return json({ error: "Choose an image smaller than 350 KB" }, 413);
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    // The declared type is never trusted: the signature decides.
+    const type = detectImageType(bytes);
+
+    if (!type) {
+      return json({ error: "Use a PNG, JPEG, WebP or GIF image" }, 415);
+    }
+
+    // Every check has passed, so this single statement is the only thing that
+    // can replace the stored image. A rejected upload never reaches it.
+    await env.DB.prepare(`
+      UPDATE users
+      SET profile_picture_data = ?, profile_picture_key = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(toDataUrl(bytes, type), session.id).run();
+
+    await writeAudit(env, session.id, "account.profile_picture.updated", session.id, {
+      bytes: bytes.length,
+      format: type
+    });
+
+    return json({ ok: true, user: publicUser(await currentUserRow()) });
+  }
+
+  if (url.pathname === "/api/account/profile-picture" && request.method === "DELETE") {
+    if (!(await requireCsrf(request, session))) {
+      return json({ error: "Security token invalid. Refresh and try again." }, 403);
+    }
+
+    await env.DB.prepare(`
+      UPDATE users
+      SET profile_picture_data = NULL, profile_picture_key = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(session.id).run();
+
+    await writeAudit(env, session.id, "account.profile_picture.removed", session.id);
+
+    return json({ ok: true, user: publicUser(await currentUserRow()) });
+  }
+
+  if (url.pathname === "/api/account" && request.method === "DELETE") {
+    if (!(await requireCsrf(request, session))) {
+      return json({ error: "Security token invalid. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Confirmation required" }, 400);
+    }
+
+    // Checked here as well as in the browser: the client is not the gate.
+    if (!body || typeof body !== "object" || body.confirmation !== "DELETE") {
+      return json({ error: "Type DELETE to confirm permanent account deletion" }, 400);
+    }
+
+    if (session.role === "admin") {
+      const admins = await env.DB.prepare(`
+        SELECT COUNT(*) AS count
+        FROM users WHERE role = 'admin' AND status = 'active'
+      `).first();
+
+      if (!admins || Number(admins.count) <= 1) {
+        return json({
+          error: "The last active administrator cannot delete their account. Promote another administrator first."
+        }, 409);
+      }
+    }
+
+    // Recorded while the actor still exists, then anonymised in the batch
+    // below, so the audit trail survives without keeping personal data.
+    await writeAudit(env, session.id, "account.deleted", session.id, {
+      permanent: true,
+      hadProfilePicture: Boolean(session.has_profile_picture)
+    });
+
+    const userId = session.id;
+
+    // One transaction. Attendance rows belong to the departing account and
+    // cannot exist without it; sessions they created and the marks they left
+    // are kept but detached; the audit trail is detached, never erased.
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM session_attendance WHERE user_id = ?").bind(userId),
+      env.DB.prepare("DELETE FROM group_members WHERE user_id = ? OR added_by = ?").bind(userId, userId),
+      env.DB.prepare("DELETE FROM session_access WHERE user_id = ?").bind(userId),
+      env.DB.prepare("UPDATE session_attendance SET marked_by = NULL WHERE marked_by = ?").bind(userId),
+      env.DB.prepare("UPDATE coding_sessions SET created_by = NULL WHERE created_by = ?").bind(userId),
+      env.DB.prepare("UPDATE coding_sessions SET created_by = NULL WHERE created_by = ?").bind(userId),
+      env.DB.prepare("DELETE FROM server_sessions WHERE user_id = ?").bind(userId),
+      env.DB.prepare("DELETE FROM auth_identities WHERE user_id = ?").bind(userId),
+      env.DB.prepare("UPDATE audit_log SET actor_user_id = NULL WHERE actor_user_id = ?").bind(userId),
+      env.DB.prepare("UPDATE users SET profile_picture_data = NULL, profile_picture_key = NULL WHERE id = ?").bind(userId),
+      env.DB.prepare("DELETE FROM users WHERE id = ?").bind(userId)
+    ]);
+
+    const headers = new Headers(jsonHeaders);
+    headers.append("set-cookie", setCookie(request, "csp_session", "", {
+      httpOnly: true,
+      maxAge: 0
+    }));
+    headers.append("set-cookie", setCookie(request, "csp_csrf", "", { maxAge: 0 }));
+
+    return new Response(JSON.stringify({ ok: true, deleted: true }), {
+      status: 200,
+      headers
+    });
+  }
+
+  if ([
+    "/api/account/profile",
+    "/api/account/profile-picture",
+    "/api/account"
+  ].includes(url.pathname)) {
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+function toDataUrl(bytes, type) {
+  let binary = "";
+  const chunk = 0x8000;
+
+  for (let offset = 0; offset < bytes.length; offset += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunk));
+  }
+
+  return `data:${type};base64,${btoa(binary)}`;
+}
+
+// Only these four containers are ever accepted or served. SVG, HTML and
+// anything scriptable cannot match, so they are rejected whatever the
+// filename or declared MIME type says.
+function detectImageType(bytes) {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e &&
+      bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a &&
+      bytes[6] === 0x1a && bytes[7] === 0x0a) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" &&
+      String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") return "image/webp";
+  if (bytes.length >= 6 && ["GIF87a", "GIF89a"].includes(String.fromCharCode(...bytes.slice(0, 6)))) return "image/gif";
+  return null;
+}
+
+async function serveProfilePicture(request, env, url) {
+  const session = await getCurrentSession(request, env);
+  if (!session) return json({ error: "Authentication required" }, 401);
+
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+
+  const match = url.pathname.match(/^\/api\/avatars\/([^/]+)$/);
+  if (!match) return json({ error: "Not found" }, 404);
+
+  const userId = decodeURIComponent(match[1]);
+  if (!userId || userId.length > 200) return json({ error: "Invalid user ID" }, 400);
+
+  const row = await env.DB.prepare(`
+    SELECT ${publicUserColumns()}, profile_picture_data
+    FROM users
+    WHERE id = ? AND status = 'active'
+  `).bind(userId).first();
+
+  const stored = row?.profile_picture_data;
+  const match2 = typeof stored === "string" &&
+    stored.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+
+  if (!match2) return json({ error: "Profile picture not found" }, 404);
+
+  const binary = atob(match2[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Response(bytes, {
+    headers: {
+      "content-type": match2[1],
+      "content-length": String(bytes.length),
+      // Private: the image is only ever rendered for a signed-in member, and
+      // the version query parameter is what defeats a stale decode.
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "referrer-policy": "no-referrer"
+    }
+  });
+}
+
+async function adminSession(request, env) {
+  const session = await getCurrentSession(request, env);
+  if (!session) return { error: json({ error: "Authentication required" }, 401) };
+  if (session.role !== "admin" || session.status !== "active") {
+    return { error: json({ error: "Administrator access required" }, 403) };
+  }
+  return { session };
+}
+
+async function writeAudit(env, actorId, action, targetId, details = {}, targetType = "user") {
+  await env.DB.prepare(`
+    INSERT INTO audit_log (id, actor_user_id, action, target_type, target_id, details_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(randomToken(18), actorId, action, targetType, targetId, JSON.stringify(details)).run();
+}
+
+// State-changing calls answer with the stored record rather than a bare `ok`.
+// The settings UI saves on every keystroke, so it needs the canonical values
+// back to prove the change actually landed.
+async function readAdminSession(env, sessionId) {
+  const row = await env.DB.prepare(`
+    SELECT s.*,
+      (SELECT COUNT(*) FROM session_attendance a
+       WHERE a.session_id = s.id AND a.status IN ('present', 'late'))
+        AS attendance_count,
+      (SELECT COUNT(*) FROM session_attendance a
+       WHERE a.session_id = s.id) AS marked_count
+    FROM coding_sessions s
+    WHERE s.id = ?
+  `).bind(sessionId).first();
+
+  if (!row) return null;
+
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+    location: row.location,
+    status: row.status,
+    createdAt: row.created_at,
+    attendanceCount: row.attendance_count,
+    markedCount: row.marked_count,
+    access: await readSessionAccess(env, sessionId)
+  };
+}
+
+// Who may see a session. No rows at all means open to every signed-in member.
+async function readSessionAccess(env, sessionId) {
+  const users = await env.DB.prepare(`
+    SELECT u.id, u.display_name_override, u.preferred_name, u.provider_name
+    FROM session_access a
+    JOIN users u ON u.id = a.user_id
+    WHERE a.session_id = ?
+    ORDER BY COALESCE(u.display_name_override, u.preferred_name, u.provider_name) COLLATE NOCASE
+  `).bind(sessionId).all();
+
+  const groups = await env.DB.prepare(`
+    SELECT g.id, g.name
+    FROM session_group_access a
+    JOIN portal_groups g ON g.id = a.group_id
+    WHERE a.session_id = ?
+    ORDER BY g.name COLLATE NOCASE
+  `).bind(sessionId).all();
+
+  const userList = (users.results || []).map(row => ({
+    id: row.id,
+    name: row.display_name_override || row.preferred_name || row.provider_name || "User"
+  }));
+  const groupList = (groups.results || []).map(row => ({ id: row.id, name: row.name }));
+
+  return {
+    restricted: userList.length > 0 || groupList.length > 0,
+    users: userList,
+    groups: groupList
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The signed-in user's own profile page
+// ---------------------------------------------------------------------------
+
+// Who may see a session. Written once and reused by every count and listing,
+// so the "sessions you can attend" number can never disagree with the list it
+// is counting. Parameter order: {alias}, seesEverything, userId, userId.
+const SESSION_VISIBILITY_SQL = `(
+  ? = 1
+  OR (
+    NOT EXISTS (SELECT 1 FROM session_access sa WHERE sa.session_id = {a}.id)
+    AND NOT EXISTS (SELECT 1 FROM session_group_access sg WHERE sg.session_id = {a}.id)
+  )
+  OR EXISTS (SELECT 1 FROM session_access sa
+             WHERE sa.session_id = {a}.id AND sa.user_id = ?)
+  OR EXISTS (SELECT 1 FROM session_group_access sg
+             JOIN group_members gm ON gm.group_id = sg.group_id
+             WHERE sg.session_id = {a}.id AND gm.user_id = ?)
+)`;
+
+function sessionVisibility(alias = "s") {
+  return SESSION_VISIBILITY_SQL.replaceAll("{a}", alias);
+}
+
+// The signed-in user's own profile page
+async function handleProfileApi(request, env, url) {
+  const session = await getCurrentSession(request, env);
+  if (!session) return json({ error: "Authentication required" }, 401);
+
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+
+  const email = await env.DB.prepare(`
+    SELECT provider_email FROM auth_identities
+    WHERE user_id = ? ORDER BY last_used_at DESC LIMIT 1
+  `).bind(session.id).first();
+
+  const attendance = await env.DB.prepare(`
+    SELECT s.id, s.title, s.description, s.starts_at, s.ends_at,
+           s.location, s.status,
+           a.status AS attendance_status, a.notes, a.marked_at
+    FROM session_attendance a
+    JOIN coding_sessions s ON s.id = a.session_id
+    WHERE a.user_id = ?
+    ORDER BY s.starts_at DESC
+    LIMIT 200
+  `).bind(session.id).all();
+
+  // "Scheduled" means scheduled *and attendable by this member*: an open
+  // session, or one locked to them directly or through one of their groups.
+  // Counting every scheduled session regardless of access was misleading.
+  const counts = await env.DB.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM coding_sessions s
+       WHERE s.status = 'scheduled' AND ${sessionVisibility("s")}) AS upcoming,
+      (SELECT COUNT(*) FROM session_attendance
+        WHERE user_id = ? AND status IN ('present', 'late')) AS attended,
+      (SELECT COUNT(*) FROM session_attendance
+        WHERE user_id = ? AND status = 'excused') AS excused
+  `).bind(
+    session.role === "admin" ? 1 : 0,
+    session.id,
+    session.id,
+    session.id,
+    session.id
+  ).first();
+
+  const xp = await env.DB.prepare(`
+    SELECT xp_enabled, levels_enabled, xp_balance, current_level
+    FROM users WHERE id = ?
+  `).bind(session.id).first();
+
+  return json({
+    user: publicUser(session),
+    email: email?.provider_email || "",
+    stats: {
+      upcoming: counts.upcoming,
+      attended: counts.attended,
+      excused: counts.excused,
+      xpEnabled: Boolean(xp?.xp_enabled),
+      levelsEnabled: Boolean(xp?.levels_enabled),
+      xpBalance: xp?.xp_balance ?? 0,
+      currentLevel: xp?.current_level ?? 1
+    },
+    attendance: (attendance.results || []).map(row => ({
+      sessionId: row.id,
+      title: row.title,
+      description: row.description,
+      startsAt: row.starts_at,
+      endsAt: row.ends_at,
+      location: row.location,
+      status: row.status,
+      attendanceStatus: row.attendance_status,
+      notes: row.notes || "",
+      markedAt: row.marked_at
+    }))
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Administrator-managed groups
+// ---------------------------------------------------------------------------
+
+function cleanGroupName(value) {
+  if (typeof value !== "string") return null;
+  const name = value.trim().replace(/\s+/g, " ");
+  if (name.length < 1 || name.length > 80) return null;
+  return name;
+}
+
+async function readGroup(env, groupId) {
+  const group = await env.DB.prepare(`
+    SELECT id, name, description, created_at, updated_at,
+      (SELECT COUNT(*) FROM group_members m WHERE m.group_id = portal_groups.id) AS member_count
+    FROM portal_groups WHERE id = ?
+  `).bind(groupId).first();
+
+  if (!group) return null;
+
+  const members = await env.DB.prepare(`
+    SELECT u.id, u.display_name_override, u.preferred_name, u.provider_name,
+      u.role, u.status,
+      (u.profile_picture_data IS NOT NULL) AS has_profile_picture,
+      length(u.profile_picture_data) AS profile_picture_length,
+      u.updated_at,
+      m.added_at
+    FROM group_members m
+    JOIN users u ON u.id = m.user_id
+    WHERE m.group_id = ?
+    ORDER BY COALESCE(u.display_name_override, u.preferred_name, u.provider_name) COLLATE NOCASE
+  `).bind(groupId).all();
+
+  return {
+    id: group.id,
+    name: group.name,
+    description: group.description,
+    createdAt: group.created_at,
+    memberCount: group.member_count,
+    members: (members.results || []).map(row => ({
+      id: row.id,
+      name: row.display_name_override || row.preferred_name || row.provider_name || "User",
+      role: row.role,
+      status: row.status,
+      hasProfilePicture: Boolean(row.has_profile_picture),
+      avatarUrl: row.has_profile_picture ? avatarUrl(row) : null,
+      addedAt: row.added_at
+    }))
+  };
+}
+
+async function handleGroupApi(request, env, url, auth) {
+  // Reads are fine without a token; every write needs one.
+  if (request.method !== "GET" && !(await requireCsrf(request, auth.session))) {
+    return json({ error: "Invalid security token. Refresh and try again." }, 403);
+  }
+
+  // /api/admin/groups
+  if (url.pathname === "/api/admin/groups") {
+    if (request.method === "GET") {
+      const result = await env.DB.prepare(`
+        SELECT id, name, description, created_at, updated_at,
+          (SELECT COUNT(*) FROM group_members m WHERE m.group_id = portal_groups.id) AS member_count
+        FROM portal_groups
+        ORDER BY name COLLATE NOCASE
+      `).all();
+
+      return json({
+        groups: (result.results || []).map(group => ({
+          id: group.id,
+          name: group.name,
+          description: group.description,
+          createdAt: group.created_at,
+          memberCount: group.member_count
+        }))
+      });
+    }
+
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => !["name", "description"].includes(key))) {
+      return json({ error: "Invalid group details" }, 400);
+    }
+
+    const name = cleanGroupName(body.name);
+    if (!name) return json({ error: "Group name must be between 1 and 80 characters" }, 400);
+
+    const description = body.description === undefined ? "" : body.description;
+    if (typeof description !== "string" || description.length > 500) {
+      return json({ error: "Description must be 500 characters or fewer" }, 400);
+    }
+
+    const id = randomToken(18);
+
+    try {
+      await env.DB.prepare(`
+        INSERT INTO portal_groups (id, name, description)
+        VALUES (?, ?, ?)
+      `).bind(id, name, description.trim()).run();
+    } catch {
+      return json({ error: "A group with that name already exists" }, 409);
+    }
+
+    await writeAudit(env, auth.session.id, "admin.group.created", id, {
+      name,
+      targetType: "group"
+    });
+
+    return json({ ok: true, id, group: await readGroup(env, id) }, 201);
+  }
+
+  const memberMatch = url.pathname.match(
+    /^\/api\/admin\/groups\/([^/]+)\/members(?:\/([^/]+))?$/
+  );
+
+  if (memberMatch) {
+    const groupId = decodeURIComponent(memberMatch[1]);
+    const userId = memberMatch[2] ? decodeURIComponent(memberMatch[2]) : null;
+
+    if (!groupId || groupId.length > 200 || (userId && userId.length > 200)) {
+      return json({ error: "Invalid group or user ID" }, 400);
+    }
+
+    const group = await env.DB.prepare("SELECT id FROM portal_groups WHERE id = ?")
+      .bind(groupId).first();
+    if (!group) return json({ error: "Group not found" }, 404);
+
+    if (request.method === "GET" && !userId) {
+      return json({ group: await readGroup(env, groupId) });
+    }
+
+    if (request.method === "POST" && !userId) {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+
+      if (!body || typeof body !== "object" || typeof body.userId !== "string") {
+        return json({ error: "Choose a member to add" }, 400);
+      }
+
+      const target = await env.DB.prepare(
+        "SELECT id FROM users WHERE id = ? AND status = 'active'"
+      ).bind(body.userId.trim().slice(0, 200)).first();
+      if (!target) return json({ error: "Active user not found" }, 404);
+
+      await env.DB.prepare(`
+        INSERT INTO group_members (group_id, user_id, added_by)
+        VALUES (?, ?, ?)
+        ON CONFLICT(group_id, user_id) DO NOTHING
+      `).bind(groupId, target.id, auth.session.id).run();
+
+      await writeAudit(env, auth.session.id, "admin.group.member.added", groupId, {
+        userId: target.id,
+        targetType: "group"
+      });
+
+      return json({ ok: true, group: await readGroup(env, groupId) });
+    }
+
+    if (request.method === "DELETE" && userId) {
+      await env.DB.prepare(
+        "DELETE FROM group_members WHERE group_id = ? AND user_id = ?"
+      ).bind(groupId, userId).run();
+
+      await writeAudit(env, auth.session.id, "admin.group.member.removed", groupId, {
+        userId,
+        targetType: "group"
+      });
+
+      return json({ ok: true, group: await readGroup(env, groupId) });
+    }
+
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  const groupMatch = url.pathname.match(/^\/api\/admin\/groups\/([^/]+)$/);
+
+  if (groupMatch) {
+    const groupId = decodeURIComponent(groupMatch[1]);
+    if (!groupId || groupId.length > 200) return json({ error: "Invalid group ID" }, 400);
+
+    if (request.method === "GET") {
+      const group = await readGroup(env, groupId);
+      if (!group) return json({ error: "Group not found" }, 404);
+      return json({ group });
+    }
+
+    if (request.method === "DELETE") {
+      const group = await env.DB.prepare("SELECT id FROM portal_groups WHERE id = ?")
+        .bind(groupId).first();
+      if (!group) return json({ error: "Group not found" }, 404);
+
+      await env.DB.prepare("DELETE FROM portal_groups WHERE id = ?").bind(groupId).run();
+      await writeAudit(env, auth.session.id, "admin.group.deleted", groupId, {
+        targetType: "group"
+      });
+
+      return json({ ok: true, deleted: true });
+    }
+
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+async function handleAdminApi(request, env, url) {
+  const auth = await adminSession(request, env);
+  if (auth.error) return auth.error;
+
+  if (url.pathname.startsWith("/api/admin/groups")) {
+    try {
+      return await handleGroupApi(request, env, url, auth);
+    } catch {
+      return json({ error: "Group request failed" }, 500);
+    }
+  }
+
+
+  if (url.pathname === "/api/admin/overview") {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    const [total, active, suspended, pending, admins] = await Promise.all([
+      env.DB.prepare("SELECT COUNT(*) AS count FROM users").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE status = 'active'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE status = 'suspended'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE status = 'pending_deletion'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND status = 'active'").first()
+    ]);
+    return json({
+      totalUsers: total.count,
+      activeUsers: active.count,
+      suspendedUsers: suspended.count,
+      pendingDeletionUsers: pending.count,
+      activeAdmins: admins.count
+    });
+  }
+
+  if (url.pathname === "/api/admin/users") {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    const search = (url.searchParams.get("q") || "").trim().slice(0, 100);
+    const pattern = "%" + search.replace(/[\\%_]/g, "\\$&") + "%";
+    const result = await env.DB.prepare(`
+      SELECT u.id, u.provider_name, u.preferred_name, u.display_name_override,
+        u.role, u.status, u.status_reason, u.created_at, u.updated_at, u.last_sign_in_at,
+        (u.profile_picture_data IS NOT NULL) AS has_profile_picture,
+        length(u.profile_picture_data) AS profile_picture_length,
+        (SELECT GROUP_CONCAT(DISTINCT ai.provider_email)
+         FROM auth_identities ai WHERE ai.user_id = u.id) AS emails
+      FROM users u
+      WHERE (? = '' OR u.id LIKE ? ESCAPE '\\'
+        OR COALESCE(u.provider_name, '') LIKE ? ESCAPE '\\'
+        OR COALESCE(u.preferred_name, '') LIKE ? ESCAPE '\\'
+        OR COALESCE(u.display_name_override, '') LIKE ? ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM auth_identities ai
+                   WHERE ai.user_id = u.id AND COALESCE(ai.provider_email, '') LIKE ? ESCAPE '\\'))
+      ORDER BY u.created_at DESC LIMIT 200
+    `).bind(search, pattern, pattern, pattern, pattern, pattern).all();
+
+    return json({
+      users: (result.results || []).map(user => ({
+        id: user.id,
+        name: user.display_name_override || user.preferred_name || user.provider_name || "User",
+        providerName: user.provider_name || "",
+        preferredName: user.preferred_name || "",
+        displayNameOverride: user.display_name_override || "",
+        emails: user.emails || "",
+        role: user.role,
+        status: user.status,
+        statusReason: user.status_reason || "",
+        hasProfilePicture: Boolean(user.has_profile_picture),
+        avatarUrl: user.has_profile_picture ? avatarUrl(user) : null,
+        createdAt: user.created_at,
+        lastSignInAt: user.last_sign_in_at
+      }))
+    });
+  }
+
+  if (url.pathname === "/api/admin/audit") {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    const result = await env.DB.prepare(`
+      SELECT a.id, a.action, a.target_type, a.target_id, a.details_json,
+        a.created_at, u.display_name_override, u.preferred_name, u.provider_name
+      FROM audit_log a
+      LEFT JOIN users u ON u.id = a.actor_user_id
+      ORDER BY a.created_at DESC LIMIT 50
+    `).all();
+
+    return json({
+      events: (result.results || []).map(event => ({
+        id: event.id,
+        action: event.action,
+        targetType: event.target_type,
+        targetId: event.target_id,
+        details: event.details_json,
+        createdAt: event.created_at,
+        actor: event.display_name_override || event.preferred_name || event.provider_name || "Deleted account"
+      }))
+    });
+  }
+
+  if (url.pathname === "/api/admin/sessions") {
+    if (request.method === "GET") {
+      const result = await env.DB.prepare(`
+        SELECT s.*,
+          (SELECT COUNT(*) FROM session_attendance a
+           WHERE a.session_id = s.id AND a.status IN ('present', 'late'))
+            AS attendance_count,
+          (SELECT COUNT(*) FROM session_attendance a
+           WHERE a.session_id = s.id) AS marked_count
+        FROM coding_sessions s
+        ORDER BY CASE WHEN s.status = 'scheduled' THEN 0 ELSE 1 END,
+          CASE WHEN s.status = 'scheduled' THEN s.starts_at END ASC,
+          CASE WHEN s.status != 'scheduled' THEN s.starts_at END DESC
+      `).all();
+
+      return json({
+        sessions: (result.results || []).map(s => ({
+          id: s.id,
+          title: s.title,
+          description: s.description,
+          startsAt: s.starts_at,
+          endsAt: s.ends_at,
+          location: s.location,
+          status: s.status,
+          createdAt: s.created_at,
+          attendanceCount: s.attendance_count,
+          markedCount: s.marked_count
+        }))
+      });
+    }
+
+    if (request.method !== "POST") {
+      return json({ error: "Method not allowed" }, 405);
+    }
+
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const allowed = new Set([
+      "title", "description", "startsAt", "endsAt", "location"
+    ]);
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => !allowed.has(key))) {
+      return json({ error: "Invalid session fields" }, 400);
+    }
+
+    if (typeof body.title !== "string" ||
+        body.title.trim().length < 1 || body.title.trim().length > 120) {
+      return json({ error: "Title must be between 1 and 120 characters" }, 400);
+    }
+
+    if (typeof body.startsAt !== "string" ||
+        !Number.isFinite(Date.parse(body.startsAt))) {
+      return json({ error: "A valid start date and time is required" }, 400);
+    }
+
+    if (body.endsAt != null &&
+        (typeof body.endsAt !== "string" ||
+         !Number.isFinite(Date.parse(body.endsAt)) ||
+         Date.parse(body.endsAt) <= Date.parse(body.startsAt))) {
+      return json({ error: "End time must be later than start time" }, 400);
+    }
+
+    if (body.description !== undefined &&
+        (typeof body.description !== "string" || body.description.length > 4000)) {
+      return json({ error: "Description must be 4000 characters or fewer" }, 400);
+    }
+
+    if (body.location !== undefined &&
+        (typeof body.location !== "string" || body.location.length > 200)) {
+      return json({ error: "Location must be 200 characters or fewer" }, 400);
+    }
+
+    const id = randomToken(18);
+
+    await env.DB.prepare(`
+      INSERT INTO coding_sessions
+        (id, title, description, starts_at, ends_at, location, created_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      id,
+      body.title.trim(),
+      (body.description || "").trim(),
+      body.startsAt,
+      body.endsAt || null,
+      (body.location || "").trim(),
+      auth.session.id
+    ).run();
+
+    await writeAudit(env, auth.session.id, "admin.session.created", id, {
+      title: body.title.trim(),
+      startsAt: body.startsAt
+    });
+
+    return json({ ok: true, id, session: await readAdminSession(env, id) }, 201);
+  }
+
+  const attendanceMatch = url.pathname.match(
+    /^\/api\/admin\/sessions\/([^/]+)\/attendance(?:\/([^/]+))?$/
+  );
+
+  if (attendanceMatch) {
+    const sessionId = decodeURIComponent(attendanceMatch[1]);
+    const userId = attendanceMatch[2]
+      ? decodeURIComponent(attendanceMatch[2])
+      : null;
+
+    if (!sessionId || sessionId.length > 200 ||
+        (userId && userId.length > 200)) {
+      return json({ error: "Invalid session or user ID" }, 400);
+    }
+
+    const codingSession = await env.DB.prepare(
+      "SELECT id FROM coding_sessions WHERE id = ?"
+    ).bind(sessionId).first();
+
+    if (!codingSession) return json({ error: "Session not found" }, 404);
+
+    if (request.method === "GET" && !userId) {
+      const result = await env.DB.prepare(`
+        SELECT u.id,
+          COALESCE(u.display_name_override, u.preferred_name,
+                   u.provider_name, 'User') AS name,
+          u.status AS account_status,
+          (u.profile_picture_data IS NOT NULL) AS has_profile_picture,
+          length(u.profile_picture_data) AS profile_picture_length,
+          u.updated_at,
+          a.status AS attendance_status,
+          a.notes,
+          a.marked_at
+        FROM users u
+        LEFT JOIN session_attendance a
+          ON a.user_id = u.id AND a.session_id = ?
+        WHERE u.status = 'active'
+        ORDER BY name COLLATE NOCASE
+        LIMIT 500
+      `).bind(sessionId).all();
+
+      return json({
+        attendance: (result.results || []).map(row => ({
+          userId: row.id,
+          name: row.name,
+          status: row.attendance_status || "unmarked",
+          hasProfilePicture: Boolean(row.has_profile_picture),
+          avatarUrl: row.has_profile_picture ? avatarUrl(row) : null,
+          notes: row.notes || "",
+          markedAt: row.marked_at
+        }))
+      });
+    }
+
+    if (request.method !== "PUT" || !userId) {
+      return json({ error: "Method not allowed" }, 405);
+    }
+
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => !["status", "notes"].includes(key))) {
+      return json({ error: "Invalid attendance details" }, 400);
+    }
+
+    // `unmarked` is a real instruction, not a missing value: it clears the
+    // mark entirely so the member is back in the unmarked pool.
+    if (body.status === "unmarked") {
+      await env.DB.prepare(
+        "DELETE FROM session_attendance WHERE session_id = ? AND user_id = ?"
+      ).bind(sessionId, userId).run();
+
+      await writeAudit(env, auth.session.id, "admin.session.attendance.cleared", sessionId, {
+        userId,
+        targetType: "session_attendance"
+      });
+
+      const counts = await env.DB.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM session_attendance
+            WHERE session_id = ? AND status IN ('present', 'late')) AS attendance_count,
+          (SELECT COUNT(*) FROM session_attendance WHERE session_id = ?) AS marked_count
+      `).bind(sessionId, sessionId).first();
+
+      return json({
+        ok: true,
+        attendance: null,
+        attendanceCount: counts.attendance_count,
+        markedCount: counts.marked_count
+      });
+    }
+
+    if (!["present", "absent", "late", "excused"].includes(body.status)) {
+      return json({ error: "Invalid attendance details" }, 400);
+    }
+
+    if (body.notes !== undefined &&
+        (typeof body.notes !== "string" || body.notes.length > 500)) {
+      return json({ error: "Attendance notes must be 500 characters or fewer" }, 400);
+    }
+
+    const targetUser = await env.DB.prepare(
+      "SELECT id FROM users WHERE id = ? AND status = 'active'"
+    ).bind(userId).first();
+
+    if (!targetUser) return json({ error: "Active user not found" }, 404);
+
+    await env.DB.prepare(`
+      INSERT INTO session_attendance
+        (session_id, user_id, status, marked_by, notes, marked_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(session_id, user_id) DO UPDATE SET
+        status = excluded.status,
+        marked_by = excluded.marked_by,
+        notes = excluded.notes,
+        marked_at = CURRENT_TIMESTAMP
+    `).bind(
+      sessionId,
+      userId,
+      body.status,
+      auth.session.id,
+      (body.notes || "").trim()
+    ).run();
+
+    await writeAudit(env, auth.session.id, "admin.session.attendance.updated", sessionId, {
+      userId,
+      status: body.status
+    });
+
+    const saved = await env.DB.prepare(`
+      SELECT u.id, u.display_name_override, u.preferred_name, u.provider_name,
+        a.status, a.notes, a.marked_at
+      FROM users u
+      JOIN session_attendance a ON a.user_id = u.id AND a.session_id = ?
+      WHERE u.id = ?
+    `).bind(sessionId, userId).first();
+
+    const counts = await env.DB.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM session_attendance
+          WHERE session_id = ? AND status IN ('present', 'late')) AS attendance_count,
+        (SELECT COUNT(*) FROM session_attendance WHERE session_id = ?) AS marked_count
+    `).bind(sessionId, sessionId).first();
+
+    return json({
+      ok: true,
+      attendance: {
+        userId,
+        name: saved.display_name_override || saved.preferred_name || saved.provider_name || "User",
+        status: saved.status,
+        notes: saved.notes || "",
+        markedAt: saved.marked_at
+      },
+      attendanceCount: counts.attendance_count,
+      markedCount: counts.marked_count
+    });
+  }
+
+  const accessMatch = url.pathname.match(
+    /^\/api\/admin\/sessions\/([^/]+)\/access(?:\/(users|groups)\/([^/]+))?$/
+  );
+
+  if (accessMatch) {
+    const sessionId = decodeURIComponent(accessMatch[1]);
+    const kind = accessMatch[2] || null;
+    const targetId = accessMatch[3] ? decodeURIComponent(accessMatch[3]) : null;
+
+    if (!sessionId || sessionId.length > 200 || (targetId && targetId.length > 200)) {
+      return json({ error: "Invalid session or member ID" }, 400);
+    }
+
+    const codingSession = await env.DB.prepare("SELECT id FROM coding_sessions WHERE id = ?")
+      .bind(sessionId).first();
+    if (!codingSession) return json({ error: "Session not found" }, 404);
+
+    if (request.method === "GET" && !kind) {
+      return json({ access: await readSessionAccess(env, sessionId) });
+    }
+
+    // Clear every restriction and put the session back in front of everyone.
+    if (request.method === "DELETE" && !kind) {
+      if (!(await requireCsrf(request, auth.session))) {
+        return json({ error: "Invalid security token. Refresh and try again." }, 403);
+      }
+
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM session_access WHERE session_id = ?").bind(sessionId),
+        env.DB.prepare("DELETE FROM session_group_access WHERE session_id = ?").bind(sessionId)
+      ]);
+
+      await writeAudit(env, auth.session.id, "admin.session.access.cleared", sessionId, {
+        targetType: "coding_session"
+      });
+
+      return json({ ok: true, access: await readSessionAccess(env, sessionId) });
+    }
+
+    if (request.method !== "PUT" || !kind || !targetId) {
+      return json({ error: "Method not allowed" }, 405);
+    }
+
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => key !== "allowed") ||
+        typeof body.allowed !== "boolean") {
+      return json({ error: "Invalid access details" }, 400);
+    }
+
+    const table = kind === "users" ? "session_access" : "session_group_access";
+    const column = kind === "users" ? "user_id" : "group_id";
+    const source = kind === "users" ? "users" : "portal_groups";
+    const label = kind === "users" ? "user" : "group";
+
+    const target = await env.DB.prepare(
+      `SELECT id FROM ${source} WHERE id = ?${kind === "users" ? " AND status = 'active'" : ""}`
+    ).bind(targetId).first();
+
+    if (!target) {
+      return json({ error: `Active ${label} not found` }, kind === "users" ? 404 : 404);
+    }
+
+    if (body.allowed) {
+      await env.DB.prepare(`
+        INSERT INTO ${table} (session_id, ${column}, granted_by)
+        VALUES (?, ?, ?)
+        ON CONFLICT(session_id, ${column}) DO NOTHING
+      `).bind(sessionId, targetId, auth.session.id).run();
+    } else {
+      await env.DB.prepare(
+        `DELETE FROM ${table} WHERE session_id = ? AND ${column} = ?`
+      ).bind(sessionId, targetId).run();
+    }
+
+    await writeAudit(env, auth.session.id, "admin.session.access.updated", sessionId, {
+      targetType: "coding_session",
+      kind,
+      subjectId: targetId,
+      allowed: body.allowed
+    });
+
+    return json({ ok: true, access: await readSessionAccess(env, sessionId) });
+  }
+
+  const sessionMatch = url.pathname.match(
+    /^\/api\/admin\/sessions\/([^/]+)$/
+  );
+
+  if (sessionMatch) {
+    const sessionId = decodeURIComponent(sessionMatch[1]);
+
+    if (!sessionId || sessionId.length > 200) {
+      return json({ error: "Invalid session ID" }, 400);
+    }
+
+    // Deletion. Cascades take the attendance marks, the access rows and the
+    // access grants with it; the coding session's own history is the thing
+    // being destroyed, so that is what gets confirmed.
+    if (request.method === "DELETE") {
+      if (!(await requireCsrf(request, auth.session))) {
+        return json({ error: "Invalid security token. Refresh and try again." }, 403);
+      }
+
+      const existing = await env.DB.prepare(
+        "SELECT id, title FROM coding_sessions WHERE id = ?"
+      ).bind(sessionId).first();
+
+      if (!existing) return json({ error: "Session not found" }, 404);
+
+      const marked = await env.DB.prepare(`
+        SELECT
+          (SELECT COUNT(*) FROM session_attendance WHERE session_id = ?) AS attendance_count,
+          (SELECT COUNT(*) FROM session_access WHERE session_id = ?) AS user_grants,
+          (SELECT COUNT(*) FROM session_group_access WHERE session_id = ?) AS group_grants
+      `).bind(sessionId, sessionId, sessionId).first();
+
+      await env.DB.prepare("DELETE FROM coding_sessions WHERE id = ?").bind(sessionId).run();
+
+      await writeAudit(env, auth.session.id, "admin.session.deleted", sessionId, {
+        targetType: "coding_session",
+        title: existing.title,
+        attendanceRemoved: marked.attendance_count
+      });
+
+      return json({
+        ok: true,
+        deleted: true,
+        removed: {
+          attendance: marked.attendance_count,
+          userGrants: marked.user_grants,
+          groupGrants: marked.group_grants
+        }
+      });
+    }
+
+    if (request.method !== "PATCH") {
+      return json({ error: "Method not allowed" }, 405);
+    }
+
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const allowed = new Set([
+      "title", "description", "startsAt", "endsAt", "location", "status"
+    ]);
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).length === 0 ||
+        Object.keys(body).some(key => !allowed.has(key))) {
+      return json({ error: "Invalid session fields" }, 400);
+    }
+
+    const current = await env.DB.prepare(
+      "SELECT * FROM coding_sessions WHERE id = ?"
+    ).bind(sessionId).first();
+
+    if (!current) return json({ error: "Session not found" }, 404);
+
+    const next = {
+      title: body.title === undefined ? current.title : (typeof body.title === "string" ? body.title.trim() : body.title),
+      description: body.description === undefined ? current.description : (typeof body.description === "string" ? body.description.trim() : body.description),
+      startsAt: body.startsAt === undefined ? current.starts_at : body.startsAt,
+      endsAt: body.endsAt === undefined ? current.ends_at : body.endsAt,
+      location: body.location === undefined ? current.location : (typeof body.location === "string" ? body.location.trim() : body.location),
+      status: body.status === undefined ? current.status : body.status
+    };
+
+    if (body.title !== undefined &&
+        (typeof body.title !== "string" ||
+         body.title.trim().length < 1 || body.title.trim().length > 120)) {
+      return json({ error: "Title must be between 1 and 120 characters" }, 400);
+    }
+
+    if (body.description !== undefined &&
+        (typeof body.description !== "string" || body.description.length > 4000)) {
+      return json({ error: "Description must be 4000 characters or fewer" }, 400);
+    }
+
+    if (body.location !== undefined &&
+        (typeof body.location !== "string" || body.location.length > 200)) {
+      return json({ error: "Location must be 200 characters or fewer" }, 400);
+    }
+
+    if (body.startsAt !== undefined &&
+        (typeof body.startsAt !== "string" ||
+         !Number.isFinite(Date.parse(body.startsAt)))) {
+      return json({ error: "Invalid start date and time" }, 400);
+    }
+
+    if (next.endsAt != null &&
+        (typeof next.endsAt !== "string" ||
+         !Number.isFinite(Date.parse(next.endsAt)) ||
+         Date.parse(next.endsAt) <= Date.parse(next.startsAt))) {
+      return json({ error: "End time must be later than start time" }, 400);
+    }
+
+    if (!["scheduled", "completed", "cancelled"].includes(next.status)) {
+      return json({ error: "Invalid session status" }, 400);
+    }
+
+    await env.DB.prepare(`
+      UPDATE coding_sessions
+      SET title = ?, description = ?, starts_at = ?, ends_at = ?,
+          location = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(
+      next.title,
+      next.description,
+      next.startsAt,
+      next.endsAt,
+      next.location,
+      next.status,
+      sessionId
+    ).run();
+
+    await writeAudit(env, auth.session.id, "admin.session.updated", sessionId, {
+      status: next.status
+    });
+
+    return json({ ok: true, session: await readAdminSession(env, sessionId) });
+  }
+
+  const match = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+  if (match && request.method === "PATCH") {
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    const allowed = new Set(["displayName", "role", "status", "statusReason"]);
+    if (!body || typeof body !== "object" ||
+        Object.keys(body).length === 0 ||
+        Object.keys(body).some(key => !allowed.has(key))) {
+      return json({ error: "Invalid update fields" }, 400);
+    }
+
+    const targetId = decodeURIComponent(match[1]);
+    if (!targetId || targetId.length > 200) return json({ error: "Invalid user ID" }, 400);
+
+    const current = await env.DB.prepare(
+      "SELECT id, role, status, display_name_override, status_reason FROM users WHERE id = ?"
+    ).bind(targetId).first();
+    if (!current) return json({ error: "User not found" }, 404);
+
+    if (body.displayName !== undefined &&
+        (typeof body.displayName !== "string" || body.displayName.trim().length > 80)) {
+      return json({ error: "Displayed name must be 80 characters or fewer" }, 400);
+    }
+    if (body.role !== undefined && !["user", "admin"].includes(body.role)) {
+      return json({ error: "Invalid role" }, 400);
+    }
+    if (body.status !== undefined &&
+        !["active", "suspended", "pending_deletion"].includes(body.status)) {
+      return json({ error: "Invalid account status" }, 400);
+    }
+
+    if (body.statusReason !== undefined) {
+      if (typeof body.statusReason !== "string" || body.statusReason.length > 500) {
+        return json({ error: "Reason must be 500 characters or fewer" }, 400);
+      }
+      if (body.statusReason.trim() && body.status === undefined &&
+          (current.status === "active" || body.status === "active")) {
+        return json({ error: "A reason only makes sense on a suspended account" }, 400);
+      }
+    }
+
+    const nextRole = body.role ?? current.role;
+    const nextStatus = body.status ?? current.status;
+    if (targetId === auth.session.id &&
+        (nextRole !== current.role || nextStatus !== current.status)) {
+      return json({ error: "You cannot change your own role or account status" }, 409);
+    }
+
+    if (current.role === "admin" && current.status === "active" &&
+        (nextRole !== "admin" || nextStatus !== "active")) {
+      const count = await env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND status = 'active'"
+      ).first();
+      if (count.count <= 1) {
+        return json({ error: "You cannot remove or suspend the last active administrator" }, 409);
+      }
+    }
+
+    const changes = [];
+    const values = [];
+    const details = {};
+
+    if (body.displayName !== undefined) {
+      const value = body.displayName.trim() || null;
+      changes.push("display_name_override = ?");
+      values.push(value);
+      details.displayName = { from: current.display_name_override, to: value };
+    }
+    if (body.role !== undefined) {
+      changes.push("role = ?");
+      values.push(nextRole);
+      details.role = { from: current.role, to: nextRole };
+    }
+    if (body.status !== undefined) {
+      changes.push("status = ?");
+      values.push(nextStatus);
+      details.status = { from: current.status, to: nextStatus };
+    }
+
+    // The reason belongs to the blocked state, so it is cleared the moment the
+    // account goes active again rather than lingering on a live account.
+    if (body.statusReason !== undefined) {
+      const reason = nextStatus === "active"
+        ? null
+        : (body.statusReason.trim() || null);
+      if (reason !== current.status_reason) {
+        changes.push("status_reason = ?");
+        values.push(reason);
+        details.statusReason = { from: current.status_reason, to: reason };
+      }
+    } else if (body.status !== undefined && nextStatus === "active" &&
+               current.status_reason) {
+      changes.push("status_reason = NULL");
+      details.statusReason = { from: current.status_reason, to: null };
+    }
+
+    if (changes.length) {
+      changes.push("updated_at = CURRENT_TIMESTAMP");
+      values.push(targetId);
+      await env.DB.prepare("UPDATE users SET " + changes.join(", ") + " WHERE id = ?")
+        .bind(...values).run();
+      await writeAudit(env, auth.session.id, "admin.user.updated", targetId, details);
+
+      if (nextStatus !== "active") {
+        await env.DB.prepare("DELETE FROM server_sessions WHERE user_id = ?")
+          .bind(targetId).run();
+      }
+    }
+
+    return json({ ok: true });
+  }
+
+  if (match && request.method !== "PATCH") {
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -609,6 +2117,21 @@ export default {
         }
       }
 
+      if (url.pathname === "/api/auth/blocked") {
+        if (request.method !== "GET") {
+          return json({ error: "Method not allowed" }, 405);
+        }
+
+        const blocked = readBlockedCookie(request);
+        const headers = new Headers(jsonHeaders);
+        headers.append("set-cookie", setCookie(request, "csp_blocked", "", {
+          httpOnly: true,
+          maxAge: 0
+        }));
+
+        return new Response(JSON.stringify({ blocked }), { status: 200, headers });
+      }
+
       if (url.pathname === "/api/auth/me") {
         if (request.method !== "GET") {
           return json({ error: "Method not allowed" }, 405);
@@ -632,6 +2155,102 @@ export default {
         }
       }
 
+      if (url.pathname === "/api/sessions") {
+        if (request.method !== "GET") {
+          return json({ error: "Method not allowed" }, 405);
+        }
+
+        const session = await getCurrentSession(request, env);
+
+        if (!session) {
+          return json({ error: "Authentication required" }, 401);
+        }
+
+        try {
+          // Administrators see every session. Everyone else sees only the
+          // open ones plus anything locked to them directly or through a group
+          // they belong to. The restriction is enforced here, in SQL, so it
+          // cannot be sidestepped by anything the browser does.
+          const seesEverything = session.role === "admin";
+
+          const result = await env.DB.prepare(`
+            SELECT
+              s.id, s.title, s.description, s.starts_at, s.ends_at,
+              s.location, s.status, s.created_at,
+              (SELECT COUNT(*)
+               FROM session_attendance a
+               WHERE a.session_id = s.id
+                 AND a.status IN ('present', 'late')) AS attendance_count,
+              (SELECT a.status
+               FROM session_attendance a
+               WHERE a.session_id = s.id
+                 AND a.user_id = ?) AS my_attendance,
+              EXISTS (SELECT 1 FROM session_access sa
+                      WHERE sa.session_id = s.id) AS locked_users,
+              EXISTS (SELECT 1 FROM session_group_access sg
+                      WHERE sg.session_id = s.id) AS locked_groups
+            FROM coding_sessions s
+            WHERE ${sessionVisibility("s")}
+            ORDER BY
+              CASE WHEN s.status = 'scheduled' THEN 0 ELSE 1 END,
+              CASE WHEN s.status = 'scheduled'
+                   THEN s.starts_at END ASC,
+              CASE WHEN s.status != 'scheduled'
+                   THEN s.starts_at END DESC
+          `).bind(session.id, seesEverything ? 1 : 0, session.id, session.id).all();
+
+          return json({
+            sessions: (result.results || []).map(item => ({
+              id: item.id,
+              title: item.title,
+              description: item.description,
+              startsAt: item.starts_at,
+              endsAt: item.ends_at,
+              location: item.location,
+              status: item.status,
+              createdAt: item.created_at,
+              attendanceCount: item.attendance_count,
+              myAttendance: item.my_attendance || "unmarked",
+              restricted: Boolean(item.locked_users || item.locked_groups)
+            }))
+          });
+        } catch {
+          return json({ error: "Unable to load sessions" }, 500);
+        }
+      }
+
+      if (url.pathname === "/api/profile") {
+        try {
+          return await handleProfileApi(request, env, url);
+        } catch {
+          return json({ error: "Profile request failed" }, 500);
+        }
+      }
+
+      if (url.pathname.startsWith("/api/avatars/")) {
+        try {
+          return await serveProfilePicture(request, env, url);
+        } catch {
+          return json({ error: "Avatar request failed" }, 500);
+        }
+      }
+
+      if (url.pathname.startsWith("/api/account")) {
+        try {
+          return await handleAccountApi(request, env, url);
+        } catch {
+          return json({ error: "Account request failed" }, 500);
+        }
+      }
+
+      if (url.pathname.startsWith("/api/admin/")) {
+        try {
+          return await handleAdminApi(request, env, url);
+        } catch {
+          return json({ error: "Admin request failed" }, 500);
+        }
+      }
+
       return json({ error: "Not found" }, 404);
     }
 
@@ -645,3 +2264,4 @@ export default {
     });
   }
 };
+

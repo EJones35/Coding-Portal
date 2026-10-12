@@ -1,4 +1,4 @@
-name = "coding-sessions-portal"
+﻿name = "coding-sessions-portal"
 main = "src/server/index.js"
 compatibility_date = "2026-10-11"
 workers_dev = true
@@ -16,3 +16,5 @@ migrations_dir = "migrations"
 
 # OAuth secrets will be added with `wrangler secret put` in a later stage.
 # Never put client secrets or tokens in this file or in source control.
+
+
