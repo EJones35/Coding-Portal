@@ -368,7 +368,7 @@
               <button class="secondary-button" id="admin-search-button" type="button">Search</button>
             </div>
             <div class="admin-table-wrap">
-              <table class="admin-table">
+              <table class="admin-table" id="admin-users-table">
                 <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
                 <tbody id="admin-users"><tr><td colspan="4">Open the admin panel to load accounts.</td></tr></tbody>
               </table>
@@ -387,7 +387,7 @@
             <p class="admin-message" id="achievements-message" role="status" aria-live="polite"></p>
             <form id="achievement-create-form" class="group-create-form">
               <label for="achievement-name-input">Name<input id="achievement-name-input" name="name" maxlength="80" required placeholder="First session"></label>
-              <label for="achievement-icon-input">Icon<input id="achievement-icon-input" name="icon" maxlength="8" placeholder="*"></label>
+              <label for="achievement-picture-input">Picture<input id="achievement-picture-input" name="picture" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label>
               <label for="achievement-description-input">Description<input id="achievement-description-input" name="description" maxlength="500" placeholder="Optional"></label>
               <button class="primary-button" type="submit">Create</button>
             </form>
@@ -428,9 +428,26 @@
 
       <footer class="footer">
         <span>CODING SESSIONS PORTAL</span>
-        <span>SECURE BY DESIGN - BUILT IN STAGES - <a href="/privacy.html">PRIVACY POLICY</a></span>
+        <span>SECURE BY DESIGN - BUILT IN STAGES - <a href="/privacy.html">PRIVACY POLICY</a> - <a href="#" id="cookie-reopen">COOKIE CHOICES</a></span>
       </footer>
     </main>
+  </div>
+
+  <div class="cookie-banner" id="cookie-banner" role="dialog" aria-labelledby="cookie-title" aria-describedby="cookie-body" hidden>
+    <div class="cookie-copy">
+      <h2 id="cookie-title">Cookies on this portal</h2>
+      <p id="cookie-body">
+        This portal uses <strong>four cookies, all essential</strong> to signing in safely: one keeps you
+        signed in, one proves a change came from this site rather than another, and two are short-lived
+        sign-in helpers. There is <strong>no advertising, no analytics and no tracking</strong> of any kind.
+        Your choices are remembered in this browser only.
+      </p>
+      <a class="cookie-link" href="/privacy.html" target="_blank" rel="noopener">Read the full privacy policy</a>
+    </div>
+    <div class="cookie-actions">
+      <button class="secondary-button" id="cookie-essential" type="button">Essential only</button>
+      <button class="primary-button" id="cookie-accept" type="button">Accept</button>
+    </div>
   </div>
 
   <div class="modal-backdrop" id="delete-modal" hidden>

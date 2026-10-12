@@ -19,6 +19,7 @@ const profileNav = el("#profile-nav");
 const adminPanel = el("#admin-panel");
 const adminMessage = el("#admin-message");
 const adminUsers = el("#admin-users");
+const adminUsersTable = el("#admin-users-table");
 const adminAudit = el("#admin-audit");
 const adminSearch = el("#admin-search");
 const groupsList = el("#groups-list");
@@ -205,6 +206,65 @@ async function apiFetch(path, options = {}, kind = "Request") {
   if (!response.ok) throw new Error(result.error || `${kind} failed.`);
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Cookie consent
+//
+// Every cookie this portal sets is essential to signing in, so this is a
+// notice and a record of consent rather than a gate. Nothing is blocked until
+// a choice is made, because blocking sign-in would break the site for no
+// privacy gain. Bumping CONSENT_VERSION asks again when the policy changes.
+// ---------------------------------------------------------------------------
+
+const CONSENT_KEY = "csp-consent";
+const CONSENT_VERSION = 1;
+
+function readConsent() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CONSENT_KEY) || "null");
+    if (!parsed || typeof parsed !== "object") return null;
+    if (parsed.version !== CONSENT_VERSION) return null;
+    if (parsed.decidedAt && Date.now() - Number(parsed.decidedAt) > 365 * 24 * 60 * 60 * 1000) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function showCookieBanner() {
+  const banner = el("#cookie-banner");
+  if (!banner) return;
+  banner.hidden = false;
+  // Move focus so the dialog is reachable and announced, not stranded.
+  requestAnimationFrame(() => el("#cookie-accept")?.focus());
+}
+
+function recordConsent(choice) {
+  try {
+    localStorage.setItem(CONSENT_KEY, JSON.stringify({
+      version: CONSENT_VERSION,
+      choice,
+      decidedAt: Date.now(),
+      // Deliberately no identifying data. This is a preference, not a record.
+      essentialOnly: true
+    }));
+  } catch {
+    // Storage unavailable: the choice simply will not be remembered.
+  }
+  el("#cookie-banner").hidden = true;
+}
+
+el("#cookie-accept").addEventListener("click", () => recordConsent("accepted"));
+el("#cookie-essential").addEventListener("click", () => recordConsent("essential"));
+
+el("#cookie-reopen").addEventListener("click", event => {
+  event.preventDefault();
+  showCookieBanner();
+});
+
+if (!readConsent()) showCookieBanner();
 
 // ---------------------------------------------------------------------------
 // Remembered interface state
@@ -790,8 +850,18 @@ function updatePageView() {
 
   if (!isAdmin) userPreviewMode = false;
 
-  // An administrator who switches to the user preview must not stay parked on
-  // an administrator-only page.
+  // The account check has not answered yet, so anything that depends on it
+  // cannot be decided. Bail out and wait - loadAccount() calls this again.
+  // Without this, opening the portal straight at #admin bounces to #home,
+  // because the first run sees nobody signed in.
+  if (!accountResolved && ["admin", "settings", "profile", "sessions"].includes(route)) {
+    adminPanel.hidden = true;
+    sessionsPanel.hidden = true;
+    settingsPanel.hidden = true;
+    profilePanel.hidden = true;
+    return;
+  }
+
   if (route === "admin" && !isAdmin) {
     window.location.hash = "home";
     return;
@@ -1649,11 +1719,13 @@ async function loadAdmin() {
       cancel.hidden = true;
 
       function setEditing(enabled) {
-        // In view mode the row is picture and name, full stop.
+        // In view mode the row is picture and name, full stop. The Role and
+        // Status columns are collapsed on the whole table, not per cell, so
+        // the headers and the cells can never disagree about where a column is.
         who.hidden = enabled;
         editFields.hidden = !enabled;
-        roleCell.hidden = !enabled;
-        statusCell.hidden = !enabled;
+        adminUsersTable.classList.toggle("is-editing", enabled);
+        row.classList.toggle("is-editing", enabled);
 
         name.disabled = !enabled;
         role.disabled = !enabled;
@@ -1663,7 +1735,6 @@ async function loadAdmin() {
         edit.hidden = enabled;
         save.hidden = !enabled;
         cancel.hidden = !enabled;
-        row.classList.toggle("is-editing", enabled);
       }
 
       // The reason box only means anything while the account is blocked.
@@ -1780,6 +1851,29 @@ function showAchievementsMessage(message, isError = false) {
   el("#achievements-message").classList.toggle("error", isError);
 }
 
+function achievementImage(item, className = "achievement-icon") {
+  const box = document.createElement("div");
+  box.className = className;
+  box.setAttribute("aria-hidden", "true");
+
+  if (item.pictureUrl) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.addEventListener("error", () => {
+      box.replaceChildren();
+      box.classList.remove("has-image");
+      box.textContent = initialFor(item.name);
+    }, { once: true });
+    image.src = item.pictureUrl;
+    box.append(image);
+    box.classList.add("has-image");
+  } else {
+    box.textContent = initialFor(item.name);
+  }
+
+  return box;
+}
+
 async function loadMyAchievements() {
   const target = el("#profile-achievements");
   if (target.hidden) return;
@@ -1806,10 +1900,7 @@ async function loadMyAchievements() {
       const card = document.createElement("article");
       card.className = "achievement-card" + (item.earned ? " is-earned" : "");
 
-      const icon = document.createElement("div");
-      icon.className = "achievement-icon";
-      icon.setAttribute("aria-hidden", "true");
-      icon.textContent = item.icon || "*";
+      const icon = achievementImage(item);
 
       const title = document.createElement("h4");
       title.textContent = item.name;
@@ -1873,10 +1964,7 @@ function renderAchievements(achievements, allUsers, allGroups) {
 
     const head = document.createElement("div");
     head.className = "achievement-admin-head";
-    const icon = document.createElement("span");
-    icon.className = "achievement-icon small";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = item.icon || "*";
+    const icon = achievementImage(item, "achievement-icon small");
     const title = document.createElement("h4");
     title.textContent = item.name;
     const count = document.createElement("span");
@@ -1884,6 +1972,60 @@ function renderAchievements(achievements, allUsers, allGroups) {
     count.textContent = `${item.winners.length} earned`;
     head.append(icon, title, count);
     card.append(head);
+
+    // Picture upload, per achievement.
+    const pictureInput = document.createElement("input");
+    pictureInput.type = "file";
+    pictureInput.accept = "image/png,image/jpeg,image/webp,image/gif";
+    pictureInput.setAttribute("aria-label", "Picture for " + item.name);
+
+    const removePicture = document.createElement("button");
+    removePicture.type = "button";
+    removePicture.className = "text-button";
+    removePicture.textContent = "Remove picture";
+    removePicture.hidden = !item.hasPicture;
+
+    async function sendPicture(file, remove) {
+      state.textContent = "Saving...";
+      state.classList.remove("error");
+      try {
+        await apiFetch(
+          "/api/admin/achievements/" + encodeURIComponent(item.id) + "/picture",
+          remove ? { method: "DELETE" } : { method: "PUT", body: file },
+          "Achievement picture"
+        );
+        await loadAchievements();
+      } catch (error) {
+        state.textContent = error.message;
+        state.classList.add("error");
+      }
+    }
+
+    pictureInput.addEventListener("change", () => {
+      const file = pictureInput.files && pictureInput.files[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append("picture", file);
+      pictureInput.value = "";
+      sendPicture(form, false);
+    });
+
+    removePicture.addEventListener("click", () => {
+      if (removePicture.dataset.armed === "yes") {
+        delete removePicture.dataset.armed;
+        removePicture.textContent = "Remove picture";
+        sendPicture(null, true);
+        return;
+      }
+      removePicture.dataset.armed = "yes";
+      removePicture.textContent = "Click again to remove";
+      setTimeout(() => {
+        if (removePicture.dataset.armed === "yes") {
+          delete removePicture.dataset.armed;
+          removePicture.textContent = "Remove picture";
+        }
+      }, 5000);
+    });
 
     if (item.description) {
       const description = document.createElement("p");
@@ -2058,6 +2200,8 @@ function renderAchievements(achievements, allUsers, allGroups) {
     card.append(
       labelled("Who can see it", mode),
       labelled(item.mode === "restricted" ? "Shown to" : "Hidden from", visibility),
+      labelled("Picture", pictureInput),
+      removePicture,
       winners,
       state,
       remove
@@ -2070,20 +2214,39 @@ function renderAchievements(achievements, allUsers, allGroups) {
 el("#achievement-create-form").addEventListener("submit", async event => {
   event.preventDefault();
   const submit = event.target.querySelector("button[type=submit]");
+  const name = el("#achievement-name-input").value.trim();
+  const description = el("#achievement-description-input").value.trim();
+  const file = el("#achievement-picture-input").files && el("#achievement-picture-input").files[0];
+
   submit.disabled = true;
 
   try {
-    await apiFetch("/api/admin/achievements", {
+    const created = await apiFetch("/api/admin/achievements", {
       method: "POST",
-      body: JSON.stringify({
-        name: el("#achievement-name-input").value.trim(),
-        icon: el("#achievement-icon-input").value.trim(),
-        description: el("#achievement-description-input").value.trim()
-      })
+      body: JSON.stringify({ name, description })
     }, "Achievement creation");
 
+    // The picture is a separate upload against the achievement that now exists,
+    // so a picture failure never rolls back the achievement itself.
+    if (file) {
+      const form = new FormData();
+      form.append("picture", file);
+      try {
+        await apiFetch("/api/admin/achievements/" +
+          encodeURIComponent(created.achievement.id) + "/picture", {
+          method: "PUT",
+          body: form
+        }, "Achievement picture");
+      } catch (error) {
+        showAchievementsMessage(
+          `"${name}" was created, but its picture failed: ${error.message}`, true);
+      }
+    }
+
     event.target.reset();
-    showAchievementsMessage("Achievement created.");
+    if (!file || !(el("#achievements-message").classList.contains("error"))) {
+      showAchievementsMessage("Achievement created.");
+    }
     await loadAchievements();
   } catch (error) {
     showAchievementsMessage(error.message, true);
@@ -2307,7 +2470,7 @@ function renderGroups(allUsers) {
     });
 
     const close = createActionButton("Close");
-    close.addEventListener("click", () => setGroupEditing(card, false));
+    close.addEventListener("click", () => setGroupEditing(false));
 
     const deleteGroup = createActionButton("Delete group");
     deleteGroup.classList.add("danger-link");
@@ -2356,36 +2519,51 @@ function renderGroups(allUsers) {
 
     card.append(view, body);
 
-    function setGroupEditing(target, on) {
+    function syncToggle() {
+      // The body reflects the minimise state only. Whether the editor inside
+      // it is open is editor.hidden's business - mixing the two in one flag is
+      // what made expanding look broken.
+      body.hidden = minimised;
+      toggle.setAttribute("aria-expanded", String(!minimised));
+      toggle.textContent = minimised ? "Expand" : "Minimise";
+    }
+
+    function setGroupEditing(on) {
       editing = on;
       card.classList.toggle("is-editing", on);
       view.hidden = on;
-      body.hidden = minimised || !on;
+      // The editor lives inside the collapsible body, so it has its own hidden
+      // flag. Forgetting this is what made Edit look broken while the container
+      // around it opened perfectly.
+      editor.hidden = !on;
       editButton.hidden = on;
 
       if (on) {
+        // Opening the editor always expands the card, otherwise it would open
+        // onto something invisible.
+        minimised = false;
+        setGroupMinimised(group.id, false);
+        syncToggle();
         nameInput.focus();
         // Members are only fetched once the editor is actually open.
         loadGroupMembers(group.id, allUsers, picker);
+      } else {
+        syncToggle();
       }
     }
 
-    editButton.addEventListener("click", () => setGroupEditing(card, true));
+    editButton.addEventListener("click", () => setGroupEditing(true));
 
     toggle.addEventListener("click", () => {
       minimised = !minimised;
-      body.hidden = minimised || editing;
-      toggle.setAttribute("aria-expanded", String(!minimised));
-      toggle.textContent = minimised ? "Expand" : "Minimise";
       setGroupMinimised(group.id, minimised);
+      syncToggle();
       if (!minimised) loadPreview(group, preview, allUsers);
     });
 
     card.__setMinimised = on => {
       minimised = on;
-      body.hidden = minimised || editing;
-      toggle.setAttribute("aria-expanded", String(!minimised));
-      toggle.textContent = minimised ? "Expand" : "Minimise";
+      syncToggle();
     };
 
     groupsList.append(card);

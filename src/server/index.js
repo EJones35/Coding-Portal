@@ -355,13 +355,15 @@ function avatarUrl(row) {
 // and the browser would happily reuse a stale decode. Exactly the bug the
 // member avatar had.
 function groupPictureUrl(group) {
-  if (group.picture_version) {
-    return `/api/group-avatars/${encodeURIComponent(group.id)}?v=${encodeURIComponent(group.picture_version)}`;
-  }
+  return pictureUrlFor("group-avatars", group.id, group.picture_version, group.updated_at);
+}
 
-  const stamp = String(group.updated_at || "").replace(/[^0-9]/g, "");
-  const size = Number(group.picture_length) || 0;
-  return `/api/group-avatars/${encodeURIComponent(group.id)}?v=${stamp}-${size}`;
+// One shape for all three picture kinds. The version token is what makes a
+// replacement visible; the timestamp is only a fallback for rows written
+// before the version column existed.
+function pictureUrlFor(path, id, version, updatedAt) {
+  const token = version || `${String(updatedAt || "").replace(/[^0-9]/g, "")}-legacy`;
+  return `/api/${path}/${encodeURIComponent(id)}?v=${encodeURIComponent(token)}`;
 }
 
 // Resolves the data URL a stored picture was written as, with the same strict
@@ -968,20 +970,35 @@ async function serveGroupPicture(request, env, url) {
 
   if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
 
-  const match = url.pathname.match(/^\/api\/group-avatars\/([^/]+)$/);
-  if (!match) return json({ error: "Not found" }, 404);
+  const groupMatch = url.pathname.match(/^\/api\/group-avatars\/([^/]+)$/);
 
-  const groupId = decodeURIComponent(match[1]);
-  if (!groupId || groupId.length > 200) return json({ error: "Invalid group ID" }, 400);
+  if (groupMatch) {
+    const achievementRow = await env.DB.prepare(
+      "SELECT id FROM achievements WHERE id = ?"
+    ).bind(decodeURIComponent(groupMatch[1])).first();
 
-  const row = await env.DB.prepare(
-    "SELECT picture_data FROM portal_groups WHERE id = ?"
-  ).bind(groupId).first();
+    if (achievementRow) {
+      const row = await env.DB.prepare(
+        "SELECT picture_data FROM achievements WHERE id = ?"
+      ).bind(achievementRow.id).first();
 
-  const picture = decodeStoredPicture(row?.picture_data);
-  if (!picture) return json({ error: "Group picture not found" }, 404);
+      const picture = decodeStoredPicture(row?.picture_data);
+      if (!picture) return json({ error: "Achievement picture not found" }, 404);
 
-  return pictureResponse(picture);
+      return pictureResponse(picture);
+    }
+
+    const groupRow = await env.DB.prepare(
+      "SELECT picture_data FROM portal_groups WHERE id = ?"
+    ).bind(decodeURIComponent(groupMatch[1])).first();
+
+    const groupPicture = decodeStoredPicture(groupRow?.picture_data);
+    if (!groupPicture) return json({ error: "Group picture not found" }, 404);
+
+    return pictureResponse(groupPicture);
+  }
+
+  return json({ error: "Not found" }, 404);
 }
 
 async function adminSession(request, env) {
@@ -1161,6 +1178,10 @@ async function readAchievement(env, row) {
     description: row.description,
     icon: row.icon,
     mode: row.mode,
+    hasPicture: Boolean(row.picture_data),
+    pictureUrl: row.picture_data
+      ? pictureUrlFor("group-avatars", row.id, row.picture_version, row.updated_at)
+      : null,
     awardCount: awarded.count,
     winners: (winners.results || []).map(user => ({
       id: user.id,
@@ -1190,8 +1211,9 @@ async function handleAchievementApi(request, env, url) {
   if (url.pathname === "/api/achievements") {
     if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
 
-    const result = await env.DB.prepare(`
-      SELECT a.id, a.name, a.description, a.icon, a.mode,
+      const result = await env.DB.prepare(`
+        SELECT a.id, a.name, a.description, a.icon, a.mode,
+          a.picture_data, a.picture_version, a.updated_at,
         EXISTS (SELECT 1 FROM achievement_awards aw
                 WHERE aw.achievement_id = a.id AND aw.user_id = ?) AS earned
       FROM achievements a
@@ -1208,6 +1230,10 @@ async function handleAchievementApi(request, env, url) {
         name: row.name,
         description: row.description,
         icon: row.icon,
+        hasPicture: Boolean(row.picture_data),
+        pictureUrl: row.picture_data
+          ? pictureUrlFor("group-avatars", row.id, row.picture_version, row.updated_at)
+          : null,
         earned: Boolean(row.earned)
       }))
     });
@@ -1217,6 +1243,80 @@ async function handleAchievementApi(request, env, url) {
 }
 
 async function handleAdminAchievementApi(request, env, url, auth) {
+  const pictureMatch = url.pathname.match(/^\/api\/admin\/achievements\/([^/]+)\/picture$/);
+
+  if (pictureMatch) {
+    if (request.method !== "PUT" && request.method !== "DELETE") {
+      return json({ error: "Method not allowed" }, 405);
+    }
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    const achievementId = decodeURIComponent(pictureMatch[1]);
+    if (!achievementId || achievementId.length > 200) {
+      return json({ error: "Invalid achievement ID" }, 400);
+    }
+
+    const existing = await env.DB.prepare("SELECT id FROM achievements WHERE id = ?")
+      .bind(achievementId).first();
+    if (!existing) return json({ error: "Achievement not found" }, 404);
+
+    if (request.method === "DELETE") {
+      await env.DB.prepare(`
+        UPDATE achievements
+        SET picture_data = NULL, picture_version = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(randomToken(9), achievementId).run();
+
+      await writeAudit(env, auth.session.id, "admin.achievement.picture.removed", achievementId, {
+        targetType: "achievement"
+      });
+
+      const cleared = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?")
+        .bind(achievementId).first();
+      return json({ ok: true, achievement: await readAchievement(env, cleared) });
+    }
+
+    let form;
+    try {
+      form = await request.formData();
+    } catch {
+      return json({ error: "Choose a valid image file" }, 400);
+    }
+
+    const file = form.get("picture");
+    if (!file || typeof file !== "object" || typeof file.arrayBuffer !== "function") {
+      return json({ error: "Choose an image file" }, 400);
+    }
+    if (!Number.isFinite(file.size) || file.size < 1) {
+      return json({ error: "That file is empty" }, 400);
+    }
+    if (file.size > MAX_PICTURE_BYTES) {
+      return json({ error: "Choose an image smaller than 350 KB" }, 413);
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const type = detectImageType(bytes);
+    if (!type) return json({ error: "Use a PNG, JPEG, WebP or GIF image" }, 415);
+
+    await env.DB.prepare(`
+      UPDATE achievements
+      SET picture_data = ?, picture_version = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(toDataUrl(bytes, type), randomToken(9), achievementId).run();
+
+    await writeAudit(env, auth.session.id, "admin.achievement.picture.updated", achievementId, {
+      targetType: "achievement",
+      format: type
+    });
+
+    const updated = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?")
+      .bind(achievementId).first();
+
+    return json({ ok: true, achievement: await readAchievement(env, updated) });
+  }
+
   const visibilityMatch = url.pathname.match(
     /^\/api\/admin\/achievements\/([^/]+)\/visibility\/(users|groups)\/([^/]+)$/
   );

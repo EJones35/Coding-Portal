@@ -1013,7 +1013,24 @@ body.modal-open { overflow: hidden; }
 }
 :root[data-theme="light"] .admin-reason-input { background: #fff; border-color: #d9a3a8; color: var(--text); }
 
-/* A user row is picture, name, and nothing else until Edit is pressed. */
+/* A user row is picture, name, and nothing else until Edit is pressed.
+   Role and Status are collapsed on the table itself, so the headers collapse
+   with the cells. Hiding only the cells leaves the header row four columns
+   wide while the body is two, and everything after shifts left. */
+.admin-users-collapsed th:nth-child(2),
+.admin-users-collapsed td:nth-child(2),
+.admin-users-collapsed th:nth-child(3),
+.admin-users-collapsed td:nth-child(3) { display: none; }
+
+.admin-table:not(.is-editing) th:nth-child(2),
+.admin-table:not(.is-editing) td:nth-child(2),
+.admin-table:not(.is-editing) th:nth-child(3),
+.admin-table:not(.is-editing) td:nth-child(3) { display: none; }
+.admin-table:not(.is-editing) th:nth-child(1),
+.admin-table:not(.is-editing) td:nth-child(1) { width: auto; }
+.admin-table:not(.is-editing) th:nth-child(4),
+.admin-table:not(.is-editing) td:nth-child(4) { width: 9rem; }
+
 .admin-user-view { gap: .7rem; }
 .admin-user-view > span { font-size: 1rem; line-height: 1.4; }
 .admin-role-badge { color: var(--cyan); font-size: .82rem; white-space: nowrap; }
@@ -1170,6 +1187,44 @@ body.modal-open { overflow: hidden; }
   .policy-table tr { border: 1px solid var(--border); border-radius: 8px; margin-bottom: .7rem; }
   .policy-table td { border: 0; border-bottom: 1px solid var(--border); }
   .policy-table td:last-child { border-bottom: 0; }
+}
+
+/* ---------------------------------------------------------------------------
+   Cookie consent banner
+   --------------------------------------------------------------------------- */
+
+.cookie-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  padding: 1rem clamp(16px, 4vw, 32px);
+  border-top: 1px solid var(--border);
+  background: var(--panel-raised);
+  box-shadow: 0 -12px 30px rgba(0, 0, 0, .28);
+}
+.cookie-copy { flex: 1 1 26rem; min-width: 0; }
+.cookie-copy h2 { margin: 0 0 .35rem; font-size: 1rem; font-weight: 600; }
+.cookie-copy p { margin: 0 0 .4rem; color: var(--muted); font-size: .84rem; line-height: 1.6; }
+.cookie-copy strong { color: var(--text); }
+.cookie-link { color: var(--cyan); font-size: .82rem; }
+.cookie-link:hover { text-decoration: underline; }
+.cookie-actions { display: flex; gap: .6rem; flex: 0 0 auto; }
+.cookie-actions .secondary-button,
+.cookie-actions .primary-button { margin-top: 0; white-space: nowrap; }
+
+:root[data-theme="light"] .cookie-copy p { color: #4a5c72; }
+
+@media (max-width: 620px) {
+  .cookie-banner { flex-direction: column; align-items: stretch; }
+  .cookie-actions { flex-direction: column-reverse; }
+  .cookie-actions .secondary-button,
+  .cookie-actions .primary-button { width: 100%; }
 }
 
 /* ---------------------------------------------------------------------------
