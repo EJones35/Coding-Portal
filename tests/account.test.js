@@ -1998,6 +1998,313 @@ test("an empty or missing group picture endpoint 404s rather than 500s", async (
 });
 
 // ---------------------------------------------------------------------------
+// The member view of sessions
+// ---------------------------------------------------------------------------
+
+test("view=member hides a locked session even from an administrator", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const outsider = await harness.addUser({ displayName: "Outsider" });
+  const outsiderSession = await harness.signIn(outsider);
+
+  const open = await seedCodingSession(harness, admin.userId);
+  const locked = await seedCodingSession(harness, admin.userId);
+
+  await call(harness, `/api/admin/sessions/${locked}/access/users/${outsider}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ allowed: true })
+  });
+
+  // The administrator's own view keeps both, so they can manage them.
+  const asAdmin = await json(await call(harness, "/api/sessions", { session: admin }));
+  assert.equal(asAdmin.sessions.length, 2);
+
+  // Asking for the member view drops that privilege. The administrator is not
+  // on the locked session, so it disappears for them exactly as it would for
+  // anybody else.
+  const asMember = await json(await call(harness, "/api/sessions?view=member", { session: admin }));
+  assert.deepEqual(asMember.sessions.map(item => item.id), [open],
+    "in member view an administrator sees only what they are on");
+
+  // And it can only ever reduce what is returned, never widen it.
+  const stranger = await json(await call(harness, "/api/sessions?view=member", { session: outsiderSession }));
+  assert.equal(stranger.sessions.length, 2,
+    "the named member sees the open session and the one locked to them");
+
+  const outsiderAsAdmin = await json(await call(harness, "/api/sessions", { session: outsiderSession }));
+  assert.equal(outsiderAsAdmin.sessions.length, 2, "an ordinary member always had this view");
+
+  // An unknown view value is not a privilege escalation either.
+  const bogus = await json(await call(harness, "/api/sessions?view=admin", { session: admin }));
+  assert.equal(bogus.sessions.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Achievements
+// ---------------------------------------------------------------------------
+
+async function createAchievement(harness, admin, overrides = {}) {
+  const response = await call(harness, "/api/admin/achievements", {
+    method: "POST",
+    session: admin,
+    body: JSON.stringify({
+      name: "First session",
+      description: "Attended your first session",
+      icon: "*",
+      ...overrides
+    })
+  });
+
+  assert.equal(response.status, 201);
+  return (await json(response)).achievement;
+}
+
+test("achievements are administrator-only to manage and readable when signed in", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const member = await harness.signIn(await harness.addUser());
+
+  assert.equal((await call(harness, "/api/admin/achievements")).status, 401);
+  assert.equal((await call(harness, "/api/admin/achievements", { session: member })).status, 403);
+  assert.equal((await call(harness, "/api/achievements")).status, 401);
+
+  await createAchievement(harness, admin);
+
+  const read = await call(harness, "/api/achievements", { session: member });
+  assert.equal(read.status, 200);
+  assert.equal((await json(read)).achievements.length, 1);
+
+  // Every write needs CSRF.
+  assert.equal((await call(harness, "/api/admin/achievements", {
+    method: "POST", session: admin, csrf: "wrong", body: JSON.stringify({ name: "x" })
+  })).status, 403);
+});
+
+test("an achievement can be hidden from a specific person", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const hidden = await harness.addUser({ displayName: "Hidden" });
+  const other = await harness.addUser({ displayName: "Other" });
+  const hiddenSession = await harness.signIn(hidden);
+  const otherSession = await harness.signIn(other);
+
+  const item = await createAchievement(harness, admin);
+
+  const set = await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${hidden}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: false })
+  });
+  assert.equal(set.status, 200);
+
+  const hiddenList = await json(await call(harness, "/api/achievements", { session: hiddenSession }));
+  assert.equal(hiddenList.achievements.length, 0, "a hidden achievement must not appear at all");
+
+  const otherList = await json(await call(harness, "/api/achievements", { session: otherSession }));
+  assert.equal(otherList.achievements.length, 1, "hiding from one person must not hide it from everyone");
+
+  // Showing it again brings it back.
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${hidden}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  });
+  const back = await json(await call(harness, "/api/achievements", { session: hiddenSession }));
+  assert.equal(back.achievements.length, 1);
+});
+
+test("a restricted achievement is visible only to the listed people and groups", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const named = await harness.addUser({ displayName: "Named" });
+  const grouped = await harness.addUser({ displayName: "Grouped" });
+  const nobody = await harness.addUser({ displayName: "Nobody" });
+
+  const group = (await json(await call(harness, "/api/admin/groups", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Helm crew" })
+  }))).group;
+  await call(harness, `/api/admin/groups/${group.id}/members`, {
+    method: "POST", session: admin, body: JSON.stringify({ userId: grouped })
+  });
+
+  const item = await createAchievement(harness, admin, { mode: "restricted" });
+
+  // Restricted with nobody listed: invisible to everyone.
+  for (const userId of [named, grouped, nobody]) {
+    const list = await json(await call(harness, "/api/achievements", {
+      session: await harness.signIn(userId)
+    }));
+    assert.equal(list.achievements.length, 0, "a restricted achievement lists nobody by default");
+  }
+
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${named}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  });
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/groups/${group.id}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  });
+
+  for (const userId of [named, grouped]) {
+    const list = await json(await call(harness, "/api/achievements", {
+      session: await harness.signIn(userId)
+    }));
+    assert.equal(list.achievements.length, 1, "listed people and group members may see it");
+  }
+
+  const outsider = await json(await call(harness, "/api/achievements", {
+    session: await harness.signIn(nobody)
+  }));
+  assert.equal(outsider.achievements.length, 0, "anyone not listed still cannot");
+});
+
+test("awarding and revoking is per member and never duplicated", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const member = await harness.addUser({ displayName: "Member" });
+  const item = await createAchievement(harness, admin);
+
+  const url = `/api/admin/achievements/${item.id}/award/${member}`;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await call(harness, url, {
+      method: "PUT", session: admin, body: JSON.stringify({ awarded: true })
+    });
+    assert.equal(response.status, 200);
+  }
+
+  const rows = await harness.DB.prepare(
+    "SELECT COUNT(*) AS count FROM achievement_awards WHERE achievement_id = ? AND user_id = ?"
+  ).bind(item.id, member).first();
+  assert.equal(rows.count, 1, "an award must not pile up");
+
+  const list = await json(await call(harness, "/api/achievements", { session: await harness.signIn(member) }));
+  assert.equal(list.achievements[0].earned, true);
+
+  await call(harness, url, { method: "PUT", session: admin, body: JSON.stringify({ awarded: false }) });
+  const after = await json(await call(harness, "/api/achievements", { session: await harness.signIn(member) }));
+  assert.equal(after.achievements[0].earned, false);
+});
+
+test("achievement input is validated and icons must be plain characters", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+
+  for (const body of [
+    { name: "" },
+    { name: "   " },
+    { name: "x".repeat(81) },
+    { name: 42 },
+    { description: "x".repeat(501) },
+    { description: 42 },
+    { icon: "x".repeat(9) },
+    { icon: "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" },
+    { mode: "somebody" },
+    { colour: "gold" }
+  ]) {
+    const response = await call(harness, "/api/admin/achievements", {
+      method: "POST", session: admin, body: JSON.stringify(body)
+    });
+    assert.equal(response.ok, false, `${JSON.stringify(body)} must be refused`);
+  }
+
+  // A plain ASCII icon is fine.
+  const good = await call(harness, "/api/admin/achievements", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Good", icon: "OK" })
+  });
+  assert.equal(good.status, 201);
+});
+
+test("achievement visibility rejects unknown subjects and bad input", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const suspended = await harness.addUser({ status: "suspended" });
+  const item = await createAchievement(harness, admin);
+
+  const base = `/api/admin/achievements/${item.id}/visibility`;
+
+  assert.equal((await call(harness, `${base}/users/nope`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  })).status, 404);
+
+  assert.equal((await call(harness, `${base}/users/${suspended}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  })).status, 404);
+
+  assert.equal((await call(harness, `${base}/groups/nope`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  })).status, 404);
+
+  // A bad body is refused, but only once the subject itself exists: an
+  // unknown member is a 404 whatever it says.
+  const active = await harness.addUser({ displayName: "Active" });
+  assert.equal((await call(harness, `${base}/users/${active}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: "yes" })
+  })).status, 400);
+
+  assert.equal((await call(harness, `${base}/users/${active}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true, extra: 1 })
+  })).status, 400);
+
+  assert.equal((await call(harness, `${base}/users/${suspended}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: "yes" })
+  })).status, 404, "an unknown member is a 404 before the body matters");
+
+  assert.equal((await call(harness, "/api/admin/achievements/nope/visibility/users/x", {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  })).status, 404);
+});
+
+test("an achievement can be renamed, changed mode and deleted", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const item = await createAchievement(harness, admin);
+
+  const edited = await call(harness, `/api/admin/achievements/${item.id}`, {
+    method: "PATCH", session: admin,
+    body: JSON.stringify({ name: "Veteran", mode: "restricted", icon: "V" })
+  });
+
+  assert.equal(edited.status, 200);
+  const result = (await json(edited)).achievement;
+  assert.equal(result.name, "Veteran");
+  assert.equal(result.mode, "restricted");
+  assert.equal(result.icon, "V");
+
+  const deleted = await call(harness, `/api/admin/achievements/${item.id}`, {
+    method: "DELETE", session: admin
+  });
+  assert.deepEqual(await json(deleted), { ok: true, deleted: true });
+
+  assert.equal((await call(harness, `/api/admin/achievements/${item.id}`, { session: admin })).status, 404);
+});
+
+test("deleting an account clears its awards and its visibility choices", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const member = await harness.addUser({ displayName: "Member" });
+  const memberSession = await harness.signIn(member);
+  const item = await createAchievement(harness, admin);
+
+  await call(harness, `/api/admin/achievements/${item.id}/award/${member}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ awarded: true })
+  });
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${member}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: false })
+  });
+
+  await call(harness, "/api/account", {
+    method: "DELETE", session: memberSession, body: JSON.stringify({ confirmation: "DELETE" })
+  });
+
+  for (const table of ["achievement_awards", "achievement_user_visibility"]) {
+    const rows = await harness.DB.prepare(
+      `SELECT COUNT(*) AS count FROM ${table} WHERE user_id = ?`
+    ).bind(member).first();
+    assert.equal(rows.count, 0, `${table} must not outlive the account`);
+  }
+
+  // The achievement itself survives.
+  const survivors = await json(await call(harness, "/api/admin/achievements", { session: admin }));
+  assert.equal(survivors.achievements.length, 1);
+  assert.equal(survivors.achievements[0].winners.length, 0);
+});
+
+// ---------------------------------------------------------------------------
 // Deployment shape
 // ---------------------------------------------------------------------------
 

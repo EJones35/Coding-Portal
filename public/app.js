@@ -242,7 +242,8 @@ const COLLAPSIBLE = {
   users: "#admin-users-section",
   groups: "#admin-groups-section",
   audit: "#admin-audit",
-  achievements: "#profile-achievements"
+  achievements: "#profile-achievements",
+  "achievements-admin": "#admin-achievements-section"
 };
 
 function applyCollapse(name, collapsed, { persist = true } = {}) {
@@ -839,9 +840,13 @@ function updatePageView() {
     if (route === "admin") {
       loadAdmin();
       loadGroups();
+      loadAchievements();
     }
     if (route === "sessions") loadSessions();
-    if (route === "profile") loadProfile();
+    if (route === "profile") {
+      loadProfile();
+      loadMyAchievements();
+    }
   }
 }
 
@@ -852,11 +857,18 @@ function setPreviewMode(enabled) {
     adminPreferences.hidden = false;
     previewBanner.hidden = false;
   }
-  updatePageView();
+  refreshRouteData();
 }
 
 previewToggle.addEventListener("click", () => setPreviewMode(!userPreviewMode));
 previewExit.addEventListener("click", () => setPreviewMode(false));
+
+// Switching view changes which sessions exist for this account, so the list
+// has to be rebuilt rather than merely re-shown.
+function refreshRouteData() {
+  loadedRoute = null;
+  updatePageView();
+}
 
 window.addEventListener("hashchange", updatePageView);
 
@@ -884,7 +896,14 @@ async function loadSessions() {
   sessionCreatePanel.hidden = !canManage;
 
   try {
-    const data = await apiFetch("/api/sessions", {}, "Sessions");
+    // In user preview an administrator is deliberately held to the member
+    // view, so a session they are not on stays hidden from them too. The
+    // server enforces this; it is not a display trick.
+    const data = await apiFetch(
+      `/api/sessions${userPreviewMode ? "?view=member" : ""}`,
+      {},
+      "Sessions"
+    );
     sessionsCache = data.sessions || [];
 
     if (!sessionsCache.length) {
@@ -1751,6 +1770,327 @@ adminSearch.addEventListener("keydown", event => {
 // ---------------------------------------------------------------------------
 // Audit log: collapsible
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Achievements
+// ---------------------------------------------------------------------------
+
+function showAchievementsMessage(message, isError = false) {
+  el("#achievements-message").textContent = message;
+  el("#achievements-message").classList.toggle("error", isError);
+}
+
+async function loadMyAchievements() {
+  const target = el("#profile-achievements");
+  if (target.hidden) return;
+
+  target.textContent = "Loading achievements...";
+
+  try {
+    const data = await apiFetch("/api/achievements", {}, "Achievements");
+    const list = data.achievements || [];
+    target.replaceChildren();
+
+    if (!list.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = "No achievements are available to you yet. If an administrator has not set any up, or none are shown to you, they will appear here.";
+      target.append(empty);
+      return;
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "achievement-grid";
+
+    for (const item of list) {
+      const card = document.createElement("article");
+      card.className = "achievement-card" + (item.earned ? " is-earned" : "");
+
+      const icon = document.createElement("div");
+      icon.className = "achievement-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = item.icon || "*";
+
+      const title = document.createElement("h4");
+      title.textContent = item.name;
+
+      const state = document.createElement("span");
+      state.className = "achievement-state";
+      state.textContent = item.earned ? "Earned" : "Not yet earned";
+
+      card.append(icon, title, state);
+
+      if (item.description) {
+        const description = document.createElement("p");
+        description.textContent = item.description;
+        card.append(description);
+      }
+
+      grid.append(card);
+    }
+
+    target.append(grid);
+  } catch (error) {
+    target.textContent = error.message || "Unable to load achievements.";
+  }
+}
+
+async function loadAchievements() {
+  if (!currentUser || currentUser.role !== "admin") return;
+
+  try {
+    const [data, users, groups] = await Promise.all([
+      apiFetch("/api/admin/achievements", {}, "Achievements"),
+      apiFetch("/api/admin/users?q=", {}, "User list"),
+      apiFetch("/api/admin/groups", {}, "Groups")
+    ]);
+
+    renderAchievements(data.achievements || [], users.users || [], groups.groups || []);
+    showAchievementsMessage((data.achievements || []).length
+      ? `${data.awardCount ?? (data.achievements || []).length} achievement(s).`
+      : "No achievements yet. Create one above.");
+  } catch (error) {
+    el("#achievements-list").replaceChildren();
+    showAchievementsMessage(error.message, true);
+  }
+}
+
+function renderAchievements(achievements, allUsers, allGroups) {
+  const target = el("#achievements-list");
+  target.replaceChildren();
+
+  if (!achievements.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No achievements yet. Create one above.";
+    target.append(empty);
+    return;
+  }
+
+  for (const item of achievements) {
+    const card = document.createElement("article");
+    card.className = "achievement-admin-card";
+
+    const head = document.createElement("div");
+    head.className = "achievement-admin-head";
+    const icon = document.createElement("span");
+    icon.className = "achievement-icon small";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = item.icon || "*";
+    const title = document.createElement("h4");
+    title.textContent = item.name;
+    const count = document.createElement("span");
+    count.className = "group-count";
+    count.textContent = `${item.winners.length} earned`;
+    head.append(icon, title, count);
+    card.append(head);
+
+    if (item.description) {
+      const description = document.createElement("p");
+      description.className = "group-description";
+      description.textContent = item.description;
+      card.append(description);
+    }
+
+    const state = document.createElement("span");
+    state.className = "row-state";
+    state.setAttribute("role", "status");
+
+    // --- Who can see it ---------------------------------------------------
+    const mode = document.createElement("select");
+    mode.setAttribute("aria-label", "Who can see " + item.name);
+    for (const [value, label] of [
+      ["everyone", "Shown to everyone"],
+      ["restricted", "Only listed people and groups"]
+    ]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      option.selected = value === item.mode;
+      mode.append(option);
+    }
+
+    mode.addEventListener("change", async () => {
+      mode.disabled = true;
+      try {
+        await apiFetch("/api/admin/achievements/" + encodeURIComponent(item.id), {
+          method: "PATCH",
+          body: JSON.stringify({ mode: mode.value })
+        }, "Achievement update");
+        state.textContent = mode.value === "restricted"
+          ? "Now only the listed people and groups can see it"
+          : "Now shown to everyone except anyone hidden";
+      } catch (error) {
+        mode.value = item.mode;
+        state.textContent = error.message;
+        state.classList.add("error");
+      } finally {
+        mode.disabled = false;
+      }
+    });
+
+    // --- Per-user and per-group show/hide ----------------------------------
+    const visibility = document.createElement("div");
+    visibility.className = "achievement-visibility";
+
+    const userHidden = new Map(item.userVisibility.map(entry => [entry.id, entry.visible]));
+    const groupHidden = new Map(item.groupVisibility.map(entry => [entry.id, entry.visible]));
+
+    async function toggle(kind, subjectId, visible) {
+      state.textContent = "Saving...";
+      state.classList.remove("error");
+      try {
+        await apiFetch(
+          "/api/admin/achievements/" + encodeURIComponent(item.id) +
+            "/visibility/" + kind + "/" + encodeURIComponent(subjectId),
+          { method: "PUT", body: JSON.stringify({ visible }) },
+          "Achievement visibility"
+        );
+        state.textContent = visible ? "Shown" : "Hidden";
+        setTimeout(() => { if (state.textContent === "Shown" || state.textContent === "Hidden") state.textContent = ""; }, 2500);
+      } catch (error) {
+        state.textContent = error.message;
+        state.classList.add("error");
+      }
+    }
+
+    for (const user of allUsers) {
+      if (user.status !== "active") continue;
+      const row = document.createElement("label");
+      row.className = "visibility-option";
+
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      // Checked means visible to this person, honouring the achievement's mode.
+      box.checked = item.mode === "restricted"
+        ? Boolean(userHidden.get(user.id))
+        : !userHidden.has(user.id) || userHidden.get(user.id) === true;
+
+      box.addEventListener("change", () => {
+        userHidden.set(user.id, box.checked);
+        toggle("users", user.id, box.checked);
+      });
+
+      const text = document.createElement("span");
+      text.textContent = user.name;
+      row.append(box, text);
+      visibility.append(row);
+    }
+
+    for (const group of allGroups) {
+      const row = document.createElement("label");
+      row.className = "visibility-option";
+
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = item.mode === "restricted"
+        ? Boolean(groupHidden.get(group.id))
+        : !groupHidden.has(group.id) || groupHidden.get(group.id) === true;
+
+      box.addEventListener("change", () => {
+        groupHidden.set(group.id, box.checked);
+        toggle("groups", group.id, box.checked);
+      });
+
+      const text = document.createElement("span");
+      text.textContent = group.name;
+      row.append(box, text);
+      visibility.append(row);
+    }
+
+    // --- Who has earned it ------------------------------------------------
+    const winners = document.createElement("div");
+    winners.className = "group-members";
+
+    const awarded = new Set(item.winners.map(winner => winner.id));
+
+    for (const user of allUsers) {
+      if (user.status !== "active") continue;
+      const row = document.createElement("div");
+      row.className = "member-identity group-member";
+      row.append(createAvatarChip(user));
+
+      const text = document.createElement("span");
+      text.textContent = user.name;
+      row.append(text);
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "text-button group-remove";
+      button.textContent = awarded.has(user.id) ? "Revoke" : "Award";
+      button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+          await apiFetch(
+            "/api/admin/achievements/" + encodeURIComponent(item.id) +
+              "/award/" + encodeURIComponent(user.id),
+            { method: "PUT", body: JSON.stringify({ awarded: !awarded.has(user.id) }) },
+            "Achievement award"
+          );
+          await loadAchievements();
+        } catch (error) {
+          button.disabled = false;
+          state.textContent = error.message;
+          state.classList.add("error");
+        }
+      });
+      row.append(button);
+      winners.append(row);
+    }
+
+    const remove = createActionButton("Delete achievement");
+    remove.classList.add("danger-link");
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        await apiFetch("/api/admin/achievements/" + encodeURIComponent(item.id), {
+          method: "DELETE"
+        }, "Achievement deletion");
+        showAchievementsMessage(`Deleted "${item.name}".`);
+        await loadAchievements();
+      } catch (error) {
+        remove.disabled = false;
+        state.textContent = error.message;
+        state.classList.add("error");
+      }
+    });
+
+    card.append(
+      labelled("Who can see it", mode),
+      labelled(item.mode === "restricted" ? "Shown to" : "Hidden from", visibility),
+      winners,
+      state,
+      remove
+    );
+
+    target.append(card);
+  }
+}
+
+el("#achievement-create-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const submit = event.target.querySelector("button[type=submit]");
+  submit.disabled = true;
+
+  try {
+    await apiFetch("/api/admin/achievements", {
+      method: "POST",
+      body: JSON.stringify({
+        name: el("#achievement-name-input").value.trim(),
+        icon: el("#achievement-icon-input").value.trim(),
+        description: el("#achievement-description-input").value.trim()
+      })
+    }, "Achievement creation");
+
+    event.target.reset();
+    showAchievementsMessage("Achievement created.");
+    await loadAchievements();
+  } catch (error) {
+    showAchievementsMessage(error.message, true);
+  } finally {
+    submit.disabled = false;
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Groups

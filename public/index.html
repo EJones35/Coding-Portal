@@ -183,7 +183,7 @@
             <button class="text-button" id="profile-achievements-toggle" data-collapse-toggle="achievements" type="button" aria-expanded="true" aria-controls="profile-achievements">Hide</button>
           </div>
           <div id="profile-achievements">
-            <p class="empty-state">No achievements yet. Badges are not part of this build, but your attendance history below is tracked from your very first session.</p>
+            <p class="empty-state">Loading achievements...</p>
           </div>
         </section>
 
@@ -375,6 +375,26 @@
             </div>
           </div>
         </section>
+        <section class="admin-section" aria-labelledby="admin-achievements-title">
+          <div class="admin-section-heading collapse-heading">
+            <h3 id="admin-achievements-title">Achievements</h3>
+            <div class="collapse-heading-actions">
+              <span>BADGES AND VISIBILITY</span>
+              <button class="text-button" data-collapse-toggle="achievements-admin" type="button" aria-expanded="true" aria-controls="admin-achievements-section">Hide</button>
+            </div>
+          </div>
+          <div id="admin-achievements-section">
+            <p class="admin-message" id="achievements-message" role="status" aria-live="polite"></p>
+            <form id="achievement-create-form" class="group-create-form">
+              <label for="achievement-name-input">Name<input id="achievement-name-input" name="name" maxlength="80" required placeholder="First session"></label>
+              <label for="achievement-icon-input">Icon<input id="achievement-icon-input" name="icon" maxlength="8" placeholder="*"></label>
+              <label for="achievement-description-input">Description<input id="achievement-description-input" name="description" maxlength="500" placeholder="Optional"></label>
+              <button class="primary-button" type="submit">Create</button>
+            </form>
+            <div class="achievements-list" id="achievements-list"><p class="empty-state">Loading achievements...</p></div>
+          </div>
+        </section>
+
         <section class="admin-section" aria-labelledby="admin-groups-title">
           <div class="admin-section-heading collapse-heading">
             <h3 id="admin-groups-title">Groups</h3>
@@ -408,7 +428,7 @@
 
       <footer class="footer">
         <span>CODING SESSIONS PORTAL</span>
-        <span>SECURE BY DESIGN - BUILT IN STAGES</span>
+        <span>SECURE BY DESIGN - BUILT IN STAGES - <a href="/privacy.html">PRIVACY POLICY</a></span>
       </footer>
     </main>
   </div>

@@ -877,6 +877,8 @@ async function handleAccountApi(request, env, url) {
       env.DB.prepare("DELETE FROM session_attendance WHERE user_id = ?").bind(userId),
       env.DB.prepare("DELETE FROM group_members WHERE user_id = ? OR added_by = ?").bind(userId, userId),
       env.DB.prepare("DELETE FROM session_access WHERE user_id = ?").bind(userId),
+      env.DB.prepare("DELETE FROM achievement_awards WHERE user_id = ?").bind(userId),
+      env.DB.prepare("DELETE FROM achievement_user_visibility WHERE user_id = ?").bind(userId),
       env.DB.prepare("UPDATE session_attendance SET marked_by = NULL WHERE marked_by = ?").bind(userId),
       env.DB.prepare("UPDATE coding_sessions SET created_by = NULL WHERE created_by = ?").bind(userId),
       env.DB.prepare("UPDATE coding_sessions SET created_by = NULL WHERE created_by = ?").bind(userId),
@@ -1099,6 +1101,418 @@ const SESSION_AUDIENCE_SQL = `(
              JOIN group_members gm ON gm.group_id = sg.group_id
              WHERE sg.session_id = ? AND gm.user_id = u.id)
 )`;
+
+// Who may see an achievement. The caller is filtered by their own grants in
+// SQL, exactly like session visibility, so a hidden achievement is absent from
+// the response rather than hidden by the browser.
+const ACHIEVEMENT_VISIBILITY_SQL = `(
+  a.mode = 'everyone'
+  AND NOT EXISTS (SELECT 1 FROM achievement_user_visibility uv
+                  WHERE uv.achievement_id = a.id AND uv.user_id = ? AND uv.visible = 0)
+  AND NOT EXISTS (SELECT 1 FROM achievement_group_visibility gv
+                  JOIN group_members gm ON gm.group_id = gv.group_id
+                  WHERE gv.achievement_id = a.id AND gm.user_id = ? AND gv.visible = 0)
+) OR (
+  a.mode = 'restricted'
+  AND (
+    EXISTS (SELECT 1 FROM achievement_user_visibility uv
+            WHERE uv.achievement_id = a.id AND uv.user_id = ? AND uv.visible = 1)
+    OR EXISTS (SELECT 1 FROM achievement_group_visibility gv
+               JOIN group_members gm ON gm.group_id = gv.group_id
+               WHERE gv.achievement_id = a.id AND gm.user_id = ? AND gv.visible = 1)
+  )
+)`;
+
+async function readAchievement(env, row) {
+  const awarded = await env.DB.prepare(`
+    SELECT COUNT(*) AS count FROM achievement_awards WHERE achievement_id = ?
+  `).bind(row.id).first();
+
+  const users = await env.DB.prepare(`
+    SELECT u.id, u.display_name_override, u.preferred_name, u.provider_name, uv.visible
+    FROM achievement_user_visibility uv
+    JOIN users u ON u.id = uv.user_id
+    WHERE uv.achievement_id = ?
+    ORDER BY COALESCE(u.display_name_override, u.preferred_name, u.provider_name) COLLATE NOCASE
+  `).bind(row.id).all();
+
+  const groups = await env.DB.prepare(`
+    SELECT g.id, g.name, gv.visible
+    FROM achievement_group_visibility gv
+    JOIN portal_groups g ON g.id = gv.group_id
+    WHERE gv.achievement_id = ?
+    ORDER BY g.name COLLATE NOCASE
+  `).bind(row.id).all();
+
+  const winners = await env.DB.prepare(`
+    SELECT u.id, u.display_name_override, u.preferred_name, u.provider_name,
+      (u.profile_picture_data IS NOT NULL) AS has_profile_picture,
+      length(u.profile_picture_data) AS profile_picture_length,
+      u.updated_at, a.granted_at
+    FROM achievement_awards a
+    JOIN users u ON u.id = a.user_id
+    WHERE a.achievement_id = ?
+    ORDER BY COALESCE(u.display_name_override, u.preferred_name, u.provider_name) COLLATE NOCASE
+  `).bind(row.id).all();
+
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    icon: row.icon,
+    mode: row.mode,
+    awardCount: awarded.count,
+    winners: (winners.results || []).map(user => ({
+      id: user.id,
+      name: user.display_name_override || user.preferred_name || user.provider_name || "User",
+      hasProfilePicture: Boolean(user.has_profile_picture),
+      avatarUrl: user.has_profile_picture ? avatarUrl(user) : null,
+      grantedAt: user.granted_at
+    })),
+    // These only ever leave the admin endpoints.
+    userVisibility: (users.results || []).map(entry => ({
+      id: entry.id,
+      name: entry.display_name_override || entry.preferred_name || entry.provider_name || "User",
+      visible: Boolean(entry.visible)
+    })),
+    groupVisibility: (groups.results || []).map(entry => ({
+      id: entry.id,
+      name: entry.name,
+      visible: Boolean(entry.visible)
+    }))
+  };
+}
+
+async function handleAchievementApi(request, env, url) {
+  const session = await getCurrentSession(request, env);
+  if (!session) return json({ error: "Authentication required" }, 401);
+
+  if (url.pathname === "/api/achievements") {
+    if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+
+    const result = await env.DB.prepare(`
+      SELECT a.id, a.name, a.description, a.icon, a.mode,
+        EXISTS (SELECT 1 FROM achievement_awards aw
+                WHERE aw.achievement_id = a.id AND aw.user_id = ?) AS earned
+      FROM achievements a
+      WHERE ${ACHIEVEMENT_VISIBILITY_SQL}
+      ORDER BY a.name COLLATE NOCASE
+      LIMIT 500
+    `).bind(
+      session.id, session.id, session.id, session.id, session.id
+    ).all();
+
+    return json({
+      achievements: (result.results || []).map(row => ({
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        icon: row.icon,
+        earned: Boolean(row.earned)
+      }))
+    });
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
+async function handleAdminAchievementApi(request, env, url, auth) {
+  const visibilityMatch = url.pathname.match(
+    /^\/api\/admin\/achievements\/([^/]+)\/visibility\/(users|groups)\/([^/]+)$/
+  );
+
+  if (visibilityMatch) {
+    if (request.method !== "PUT") return json({ error: "Method not allowed" }, 405);
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    const achievementId = decodeURIComponent(visibilityMatch[1]);
+    const kind = visibilityMatch[2];
+    const subjectId = decodeURIComponent(visibilityMatch[3]);
+
+    if (!achievementId || achievementId.length > 200 || !subjectId || subjectId.length > 200) {
+      return json({ error: "Invalid achievement or subject ID" }, 400);
+    }
+
+    const achievement = await env.DB.prepare("SELECT id FROM achievements WHERE id = ?")
+      .bind(achievementId).first();
+    if (!achievement) return json({ error: "Achievement not found" }, 404);
+
+    const isUser = kind === "users";
+    const table = isUser ? "achievement_user_visibility" : "achievement_group_visibility";
+    const column = isUser ? "user_id" : "group_id";
+    const source = isUser ? "users" : "portal_groups";
+
+    const subject = await env.DB.prepare(
+      `SELECT id FROM ${source} WHERE id = ?${isUser ? " AND status = 'active'" : ""}`
+    ).bind(subjectId).first();
+    if (!subject) return json({ error: `Active ${isUser ? "member" : "group"} not found` }, 404);
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => key !== "visible") ||
+        typeof body.visible !== "boolean") {
+      return json({ error: "Invalid visibility settings" }, 400);
+    }
+
+    await env.DB.prepare(`
+      INSERT INTO ${table} (achievement_id, ${column}, visible)
+      VALUES (?, ?, ?)
+      ON CONFLICT(achievement_id, ${column}) DO UPDATE SET visible = excluded.visible
+    `).bind(achievementId, subjectId, body.visible ? 1 : 0).run();
+
+    await writeAudit(env, auth.session.id, "admin.achievement.visibility.updated", achievementId, {
+      targetType: "achievement",
+      kind,
+      subjectId,
+      visible: body.visible
+    });
+
+    const updated = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?")
+      .bind(achievementId).first();
+
+    return json({ ok: true, achievement: await readAchievement(env, updated) });
+  }
+
+  const awardMatch = url.pathname.match(
+    /^\/api\/admin\/achievements\/([^/]+)\/award\/([^/]+)$/
+  );
+
+  if (awardMatch) {
+    if (request.method !== "PUT") return json({ error: "Method not allowed" }, 405);
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    const achievementId = decodeURIComponent(awardMatch[1]);
+    const userId = decodeURIComponent(awardMatch[2]);
+
+    if (!achievementId || achievementId.length > 200 || !userId || userId.length > 200) {
+      return json({ error: "Invalid achievement or member ID" }, 400);
+    }
+
+    const achievement = await env.DB.prepare("SELECT id FROM achievements WHERE id = ?")
+      .bind(achievementId).first();
+    if (!achievement) return json({ error: "Achievement not found" }, 404);
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => key !== "awarded") ||
+        typeof body.awarded !== "boolean") {
+      return json({ error: "Invalid award details" }, 400);
+    }
+
+    if (body.awarded) {
+      const target = await env.DB.prepare(
+        "SELECT id FROM users WHERE id = ? AND status = 'active'"
+      ).bind(userId).first();
+      if (!target) return json({ error: "Active member not found" }, 404);
+
+      await env.DB.prepare(`
+        INSERT INTO achievement_awards (achievement_id, user_id, granted_by)
+        VALUES (?, ?, ?)
+        ON CONFLICT(achievement_id, user_id) DO NOTHING
+      `).bind(achievementId, userId, auth.session.id).run();
+    } else {
+      await env.DB.prepare(
+        "DELETE FROM achievement_awards WHERE achievement_id = ? AND user_id = ?"
+      ).bind(achievementId, userId).run();
+    }
+
+    await writeAudit(env, auth.session.id, "admin.achievement.award.updated", achievementId, {
+      targetType: "achievement",
+      userId,
+      awarded: body.awarded
+    });
+
+    const updated = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?")
+      .bind(achievementId).first();
+
+    return json({ ok: true, achievement: await readAchievement(env, updated) });
+  }
+
+  if (url.pathname === "/api/admin/achievements") {
+    if (request.method === "GET") {
+      const result = await env.DB.prepare(`
+        SELECT * FROM achievements ORDER BY name COLLATE NOCASE LIMIT 500
+      `).all();
+
+      const achievements = [];
+      for (const row of result.results || []) {
+        achievements.push(await readAchievement(env, row));
+      }
+
+      return json({ achievements });
+    }
+
+    if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some(key => !["name", "description", "icon", "mode"].includes(key))) {
+      return json({ error: "Invalid achievement details" }, 400);
+    }
+
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (name.length < 1 || name.length > 80) {
+      return json({ error: "Achievement name must be between 1 and 80 characters" }, 400);
+    }
+
+    const description = body.description === undefined ? "" : body.description;
+    if (typeof description !== "string" || description.length > 500) {
+      return json({ error: "Description must be 500 characters or fewer" }, 400);
+    }
+
+    // Icons are text, and deliberately capped to plain characters so nothing
+    // exotic can be stored to be rendered back at another member.
+    const icon = body.icon === undefined ? "" : body.icon;
+    if (typeof icon !== "string" || icon.length > 8 || /[^\x20-\x7E]/.test(icon)) {
+      return json({ error: "Icon must be 8 plain characters or fewer" }, 400);
+    }
+
+    const mode = body.mode === undefined ? "everyone" : body.mode;
+    if (!["everyone", "restricted"].includes(mode)) {
+      return json({ error: "Invalid visibility mode" }, 400);
+    }
+
+    const id = randomToken(18);
+
+    await env.DB.prepare(`
+      INSERT INTO achievements (id, name, description, icon, mode)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(id, name, description.trim(), icon.trim(), mode).run();
+
+    await writeAudit(env, auth.session.id, "admin.achievement.created", id, {
+      targetType: "achievement",
+      name
+    });
+
+    const created = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?").bind(id).first();
+    return json({ ok: true, achievement: await readAchievement(env, created) }, 201);
+  }
+
+  const achievementMatch = url.pathname.match(/^\/api\/admin\/achievements\/([^/]+)$/);
+
+  if (achievementMatch) {
+    const id = decodeURIComponent(achievementMatch[1]);
+    if (!id || id.length > 200) return json({ error: "Invalid achievement ID" }, 400);
+
+    if (request.method === "GET") {
+      const row = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?").bind(id).first();
+      if (!row) return json({ error: "Achievement not found" }, 404);
+      return json({ achievement: await readAchievement(env, row) });
+    }
+
+    if (request.method === "DELETE") {
+      if (!(await requireCsrf(request, auth.session))) {
+        return json({ error: "Invalid security token. Refresh and try again." }, 403);
+      }
+
+      const row = await env.DB.prepare("SELECT id, name FROM achievements WHERE id = ?")
+        .bind(id).first();
+      if (!row) return json({ error: "Achievement not found" }, 404);
+
+      await env.DB.prepare("DELETE FROM achievements WHERE id = ?").bind(id).run();
+      await writeAudit(env, auth.session.id, "admin.achievement.deleted", id, {
+        targetType: "achievement",
+        name: row.name
+      });
+
+      return json({ ok: true, deleted: true });
+    }
+
+    if (request.method !== "PATCH") return json({ error: "Method not allowed" }, 405);
+    if (!(await requireCsrf(request, auth.session))) {
+      return json({ error: "Invalid security token. Refresh and try again." }, 403);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "Invalid JSON body" }, 400);
+    }
+
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).length === 0 ||
+        Object.keys(body).some(key => !["name", "description", "icon", "mode"].includes(key))) {
+      return json({ error: "Invalid achievement details" }, 400);
+    }
+
+    const current = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?")
+      .bind(id).first();
+    if (!current) return json({ error: "Achievement not found" }, 404);
+
+    const next = { ...current };
+
+    if (body.name !== undefined) {
+      next.name = typeof body.name === "string" ? body.name.trim() : "";
+      if (next.name.length < 1 || next.name.length > 80) {
+        return json({ error: "Achievement name must be between 1 and 80 characters" }, 400);
+      }
+    }
+
+    if (body.description !== undefined) {
+      if (typeof body.description !== "string" || body.description.length > 500) {
+        return json({ error: "Description must be 500 characters or fewer" }, 400);
+      }
+      next.description = body.description.trim();
+    }
+
+    if (body.icon !== undefined) {
+      if (typeof body.icon !== "string" || body.icon.length > 8 || /[^\x20-\x7E]/.test(body.icon)) {
+        return json({ error: "Icon must be 8 plain characters or fewer" }, 400);
+      }
+      next.icon = body.icon.trim();
+    }
+
+    if (body.mode !== undefined) {
+      if (!["everyone", "restricted"].includes(body.mode)) {
+        return json({ error: "Invalid visibility mode" }, 400);
+      }
+      next.mode = body.mode;
+    }
+
+    await env.DB.prepare(`
+      UPDATE achievements
+      SET name = ?, description = ?, icon = ?, mode = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(next.name, next.description, next.icon, next.mode, id).run();
+
+    await writeAudit(env, auth.session.id, "admin.achievement.updated", id, {
+      targetType: "achievement",
+      name: next.name,
+      mode: next.mode
+    });
+
+    const updated = await env.DB.prepare("SELECT * FROM achievements WHERE id = ?").bind(id).first();
+    return json({ ok: true, achievement: await readAchievement(env, updated) });
+  }
+
+  return json({ error: "Not found" }, 404);
+}
 
 // The signed-in user's own profile page
 async function handleProfileApi(request, env, url) {
@@ -1516,6 +1930,14 @@ async function handleGroupApi(request, env, url, auth) {
 async function handleAdminApi(request, env, url) {
   const auth = await adminSession(request, env);
   if (auth.error) return auth.error;
+
+  if (url.pathname.startsWith("/api/admin/achievements")) {
+    try {
+      return await handleAdminAchievementApi(request, env, url, auth);
+    } catch {
+      return json({ error: "Achievement request failed" }, 500);
+    }
+  }
 
   if (url.pathname.startsWith("/api/admin/groups")) {
     try {
@@ -2387,11 +2809,12 @@ export default {
         }
 
         try {
-          // Administrators see every session. Everyone else sees only the
-          // open ones plus anything locked to them directly or through a group
-          // they belong to. The restriction is enforced here, in SQL, so it
-          // cannot be sidestepped by anything the browser does.
-          const seesEverything = session.role === "admin";
+          // Administrators see every session so they can manage them. Asking for
+          // the member view drops that privilege: the caller then sees only
+          // what they would see as an ordinary member. It can only ever
+          // *reduce* what is returned, so it cannot be used to gain anything.
+          const memberView = url.searchParams.get("view") === "member";
+          const seesEverything = !memberView && session.role === "admin";
 
           const result = await env.DB.prepare(`
             SELECT
@@ -2436,6 +2859,14 @@ export default {
           });
         } catch {
           return json({ error: "Unable to load sessions" }, 500);
+        }
+      }
+
+      if (url.pathname === "/api/achievements") {
+        try {
+          return await handleAchievementApi(request, env, url);
+        } catch {
+          return json({ error: "Achievement request failed" }, 500);
         }
       }
 

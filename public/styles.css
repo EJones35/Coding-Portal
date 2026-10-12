@@ -1081,3 +1081,157 @@ body.modal-open { overflow: hidden; }
   .group-actions { align-items: stretch; flex-direction: column; }
   .group-actions .secondary-button { width: 100%; }
 }
+
+/* ---------------------------------------------------------------------------
+   Privacy policy
+   --------------------------------------------------------------------------- */
+
+.policy-page { min-height: 100vh; }
+.policy-shell { max-width: 900px; margin: 0 auto; padding: 28px clamp(18px, 4vw, 32px) 60px; }
+.policy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.policy-brand { padding: 0; }
+.policy-back { margin-top: 0; }
+.policy-card { padding: clamp(1.2rem, 3vw, 2.2rem) 0 0; }
+.policy-card h1 { margin: .4rem 0 .3rem; font-size: clamp(28px, 5vw, 40px); }
+.policy-updated { margin: 0 0 1.6rem; color: var(--muted); font-size: .88rem; }
+.policy-card h2 {
+  margin: 2.2rem 0 .7rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  font-size: 1.18rem;
+}
+.policy-card p { max-width: 68ch; color: #b6c6da; line-height: 1.75; font-size: .95rem; }
+.policy-card strong { color: var(--text); }
+.policy-card code {
+  padding: .1rem .35rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--panel-raised);
+  font-size: .85em;
+}
+.policy-summary {
+  margin: 1.4rem 0 .5rem;
+  padding: 1.1rem 1.2rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--cyan);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.policy-summary p { margin: 0; color: var(--text); }
+.policy-list { max-width: 68ch; margin: .6rem 0; padding-left: 1.2rem; color: #b6c6da; line-height: 1.75; font-size: .95rem; }
+.policy-list li { margin-bottom: .45rem; }
+.policy-table {
+  width: 100%;
+  margin: .9rem 0;
+  border-collapse: collapse;
+  font-size: .9rem;
+}
+.policy-table th, .policy-table td {
+  padding: .65rem .7rem;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.6;
+}
+.policy-table th { color: var(--muted); font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; }
+.policy-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 2.6rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: .8rem;
+  letter-spacing: .1em;
+}
+.policy-footer a { color: var(--cyan); }
+.footer a { color: var(--cyan); }
+.footer a:hover { text-decoration: underline; }
+
+:root[data-theme="light"] .policy-card p,
+:root[data-theme="light"] .policy-list { color: #40536b; }
+:root[data-theme="light"] .policy-summary { background: #fff; }
+
+@media (max-width: 700px) {
+  .policy-header { flex-direction: column; align-items: stretch; }
+  .policy-back { width: 100%; }
+  .policy-table { font-size: .85rem; }
+  .policy-table th, .policy-table td { display: block; }
+  .policy-table thead { display: none; }
+  .policy-table tr { border: 1px solid var(--border); border-radius: 8px; margin-bottom: .7rem; }
+  .policy-table td { border: 0; border-bottom: 1px solid var(--border); }
+  .policy-table td:last-child { border-bottom: 0; }
+}
+
+/* ---------------------------------------------------------------------------
+   Achievements
+   --------------------------------------------------------------------------- */
+
+.achievement-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: .8rem;
+}
+.achievement-card {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  opacity: .62;
+}
+.achievement-card.is-earned { opacity: 1; border-color: var(--cyan); }
+.achievement-icon {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: .7rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--cyan);
+  background: var(--panel);
+  font-size: 1.3rem;
+  font-weight: 700;
+}
+.achievement-icon.small { width: 34px; height: 34px; margin: 0; font-size: 1rem; border-radius: 8px; }
+.achievement-card h4 { margin: 0 0 .3rem; font-size: .98rem; overflow-wrap: anywhere; }
+.achievement-card p { margin: .4rem 0 0; color: var(--muted); font-size: .82rem; line-height: 1.55; }
+.achievement-state { color: var(--muted); font-size: .74rem; letter-spacing: .1em; text-transform: uppercase; }
+.achievement-card.is-earned .achievement-state { color: var(--cyan); }
+
+.achievements-list { display: grid; gap: .9rem; }
+.achievement-admin-card {
+  display: grid;
+  gap: .8rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.achievement-admin-head { display: flex; align-items: center; gap: .7rem; min-width: 0; }
+.achievement-admin-head h4 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.achievement-admin-card > label { display: grid; gap: .35rem; font-size: .82rem; color: var(--muted); }
+.achievement-visibility {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: .3rem .8rem;
+  max-height: 12rem;
+  overflow-y: auto;
+  padding: .6rem .7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.visibility-option { display: flex; align-items: center; gap: .5rem; font-size: .86rem; color: var(--text); cursor: pointer; }
+.visibility-option input { margin: 0; accent-color: var(--cyan); }
+
+:root[data-theme="light"] .achievement-card { background: #f7fafd; }
+:root[data-theme="light"] .achievement-card.is-earned { background: #fff; }
+:root[data-theme="light"] .achievement-icon { background: #fff; }
