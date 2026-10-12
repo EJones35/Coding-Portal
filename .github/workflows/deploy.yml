@@ -1,23 +1,8 @@
 name: Deploy
 
-# Pushes to main are checked and then deployed to Cloudflare Workers.
-#
-# Migrations run before the Worker is published. Every migration in this
-# repository is additive only: CREATE TABLE, CREATE INDEX, or ADD COLUMN with a
-# default or nullable value. A migration that drops or rewrites existing data
-# must not be merged without reviewing this workflow first, because it will be
-# applied to production automatically the moment it lands on main.
-
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-
-# Never let two deploys race. A queued run waits for the one in front of it
-# rather than cancelling it halfway through a migration.
-concurrency:
-  group: deploy-production
-  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -26,11 +11,6 @@ jobs:
   check:
     name: Check and deploy
     runs-on: ubuntu-latest
-    # No `environment:` key here. Referencing one requires `deployments: write`,
-    # and this workflow only needs read access to the repository. When you want
-    # a protected production environment with required reviewers, add
-    # `environment: production` here and `deployments: write` to permissions at
-    # the same time.
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -47,30 +27,5 @@ jobs:
       - name: Syntax checks
         run: npm run check
 
-      # 87 tests, run against real SQLite through a D1-compatible adapter.
-      # Nothing reaches Cloudflare if these fail.
       - name: Unit tests
         run: npm test
-
-      - name: Apply D1 migrations
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply scratch-portal-db --remote
-
-      - name: Deploy Worker
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
-
-      - name: Report missing credentials
-        if: ${{ secrets.CLOUDFLARE_API_TOKEN == '' }}
-        run: |
-          echo "::notice::Checks passed, but deployment was skipped: the"
-          echo "::notice::CLOUDFLARE_API_TOKEN repository secret is not set."
-          echo "::notice::See the Deployment section of README.md."
