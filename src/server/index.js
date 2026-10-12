@@ -322,7 +322,7 @@ async function requireCsrf(request, session) {
 // replaced with an optional table alias so the session join and the standalone
 // user lookup can never drift apart.
 const USER_PUBLIC_COLUMNS = `{p}id, {p}provider_name, {p}preferred_name,
-  {p}display_name_override, {p}status, {p}role,
+  {p}display_name_override, {p}status, {p}role, {p}picture_version,
   ({p}profile_picture_data IS NOT NULL) AS has_profile_picture,
   length({p}profile_picture_data) AS profile_picture_length,
   {p}created_at, {p}updated_at, {p}last_sign_in_at`;
@@ -332,10 +332,14 @@ function publicUserColumns(prefix = "") {
 }
 
 // The picture itself never leaves D1 as a data URL. Clients receive a
-// versioned URL for an authenticated image endpoint instead. The version is
-// derived from the row so it changes exactly when the stored image changes,
-// which is what stops a browser reusing a decoded, obsolete picture.
+// versioned URL for an authenticated image endpoint instead. The version is a
+// random token rewritten on every picture change, so a new picture always
+// means a new URL and a browser can never reuse an obsolete decode. The
+// updated_at/length fallback only applies to rows written before that column
+// existed.
 function profilePictureVersion(row) {
+  if (row.picture_version) return String(row.picture_version);
+
   const stamp = String(row.updated_at || "").replace(/[^0-9]/g, "");
   return `${stamp}-${Number(row.profile_picture_length) || 0}`;
 }
@@ -343,6 +347,55 @@ function profilePictureVersion(row) {
 function avatarUrl(row) {
   return `/api/avatars/${encodeURIComponent(row.id)}` +
     `?v=${encodeURIComponent(profilePictureVersion(row))}`;
+}
+
+// A group's picture is versioned from its row's updated_at *and* the byte
+// length of the stored image. updated_at alone only has one-second resolution,
+// so two pictures uploaded inside the same second would produce the same URL
+// and the browser would happily reuse a stale decode. Exactly the bug the
+// member avatar had.
+function groupPictureUrl(group) {
+  if (group.picture_version) {
+    return `/api/group-avatars/${encodeURIComponent(group.id)}?v=${encodeURIComponent(group.picture_version)}`;
+  }
+
+  const stamp = String(group.updated_at || "").replace(/[^0-9]/g, "");
+  const size = Number(group.picture_length) || 0;
+  return `/api/group-avatars/${encodeURIComponent(group.id)}?v=${stamp}-${size}`;
+}
+
+// Resolves the data URL a stored picture was written as, with the same strict
+// allow-list the upload path enforces. Anything else is treated as absent.
+function decodeStoredPicture(stored) {
+  if (typeof stored !== "string") return null;
+
+  const match = stored.match(
+    /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/
+  );
+  if (!match) return null;
+
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return { type: match[1], bytes };
+}
+
+function pictureResponse(picture) {
+  return new Response(picture.bytes, {
+    headers: {
+      "content-type": picture.type,
+      "content-length": String(picture.bytes.length),
+      // Private: rendered only for a signed-in member, and the version query
+      // parameter is what defeats a stale decode.
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "referrer-policy": "no-referrer"
+    }
+  });
 }
 
 function publicUser(row) {
@@ -749,9 +802,9 @@ async function handleAccountApi(request, env, url) {
     await env.DB.prepare(`
       UPDATE users
       SET profile_picture_data = ?, profile_picture_key = NULL,
-          updated_at = CURRENT_TIMESTAMP
+          picture_version = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).bind(toDataUrl(bytes, type), session.id).run();
+    `).bind(toDataUrl(bytes, type), randomToken(9), session.id).run();
 
     await writeAudit(env, session.id, "account.profile_picture.updated", session.id, {
       bytes: bytes.length,
@@ -769,9 +822,9 @@ async function handleAccountApi(request, env, url) {
     await env.DB.prepare(`
       UPDATE users
       SET profile_picture_data = NULL, profile_picture_key = NULL,
-          updated_at = CURRENT_TIMESTAMP
+          picture_version = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).bind(session.id).run();
+    `).bind(randomToken(9), session.id).run();
 
     await writeAudit(env, session.id, "account.profile_picture.removed", session.id);
 
@@ -901,30 +954,32 @@ async function serveProfilePicture(request, env, url) {
     WHERE id = ? AND status = 'active'
   `).bind(userId).first();
 
-  const stored = row?.profile_picture_data;
-  const match2 = typeof stored === "string" &&
-    stored.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/);
+  const picture = decodeStoredPicture(row?.profile_picture_data);
+  if (!picture) return json({ error: "Profile picture not found" }, 404);
 
-  if (!match2) return json({ error: "Profile picture not found" }, 404);
+  return pictureResponse(picture);
+}
 
-  const binary = atob(match2[2]);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
+async function serveGroupPicture(request, env, url) {
+  const session = await getCurrentSession(request, env);
+  if (!session) return json({ error: "Authentication required" }, 401);
 
-  return new Response(bytes, {
-    headers: {
-      "content-type": match2[1],
-      "content-length": String(bytes.length),
-      // Private: the image is only ever rendered for a signed-in member, and
-      // the version query parameter is what defeats a stale decode.
-      "cache-control": "private, no-store",
-      "x-content-type-options": "nosniff",
-      "content-security-policy": "default-src 'none'; sandbox",
-      "referrer-policy": "no-referrer"
-    }
-  });
+  if (request.method !== "GET") return json({ error: "Method not allowed" }, 405);
+
+  const match = url.pathname.match(/^\/api\/group-avatars\/([^/]+)$/);
+  if (!match) return json({ error: "Not found" }, 404);
+
+  const groupId = decodeURIComponent(match[1]);
+  if (!groupId || groupId.length > 200) return json({ error: "Invalid group ID" }, 400);
+
+  const row = await env.DB.prepare(
+    "SELECT picture_data FROM portal_groups WHERE id = ?"
+  ).bind(groupId).first();
+
+  const picture = decodeStoredPicture(row?.picture_data);
+  if (!picture) return json({ error: "Group picture not found" }, 404);
+
+  return pictureResponse(picture);
 }
 
 async function adminSession(request, env) {
@@ -1030,6 +1085,21 @@ function sessionVisibility(alias = "s") {
   return SESSION_VISIBILITY_SQL.replaceAll("{a}", alias);
 }
 
+// The audience of one session: which members are on it. Used to decide who the
+// attendance register lists. No administrator bypass here on purpose - a
+// register that lists the whole portal is what this exists to prevent.
+const SESSION_AUDIENCE_SQL = `(
+  (
+    NOT EXISTS (SELECT 1 FROM session_access sa WHERE sa.session_id = ?)
+    AND NOT EXISTS (SELECT 1 FROM session_group_access sg WHERE sg.session_id = ?)
+  )
+  OR EXISTS (SELECT 1 FROM session_access sa
+             WHERE sa.session_id = ? AND sa.user_id = u.id)
+  OR EXISTS (SELECT 1 FROM session_group_access sg
+             JOIN group_members gm ON gm.group_id = sg.group_id
+             WHERE sg.session_id = ? AND gm.user_id = u.id)
+)`;
+
 // The signed-in user's own profile page
 async function handleProfileApi(request, env, url) {
   const session = await getCurrentSession(request, env);
@@ -1055,7 +1125,9 @@ async function handleProfileApi(request, env, url) {
 
   // "Scheduled" means scheduled *and attendable by this member*: an open
   // session, or one locked to them directly or through one of their groups.
-  // Counting every scheduled session regardless of access was misleading.
+  // Counting every scheduled session regardless of locking was misleading.
+  // Deliberately no administrator bypass: this is a personal page, so it
+  // answers what this person can actually attend.
   const counts = await env.DB.prepare(`
     SELECT
       (SELECT COUNT(*) FROM coding_sessions s
@@ -1064,13 +1136,7 @@ async function handleProfileApi(request, env, url) {
         WHERE user_id = ? AND status IN ('present', 'late')) AS attended,
       (SELECT COUNT(*) FROM session_attendance
         WHERE user_id = ? AND status = 'excused') AS excused
-  `).bind(
-    session.role === "admin" ? 1 : 0,
-    session.id,
-    session.id,
-    session.id,
-    session.id
-  ).first();
+  `).bind(0, session.id, session.id, session.id, session.id).first();
 
   const xp = await env.DB.prepare(`
     SELECT xp_enabled, levels_enabled, xp_balance, current_level
@@ -1117,7 +1183,8 @@ function cleanGroupName(value) {
 
 async function readGroup(env, groupId) {
   const group = await env.DB.prepare(`
-    SELECT id, name, description, created_at, updated_at,
+    SELECT id, name, description, picture_data, picture_version, created_at, updated_at,
+      length(picture_data) AS picture_length,
       (SELECT COUNT(*) FROM group_members m WHERE m.group_id = portal_groups.id) AS member_count
     FROM portal_groups WHERE id = ?
   `).bind(groupId).first();
@@ -1141,6 +1208,8 @@ async function readGroup(env, groupId) {
     id: group.id,
     name: group.name,
     description: group.description,
+    hasPicture: Boolean(group.picture_data),
+    pictureUrl: group.picture_data ? groupPictureUrl(group) : null,
     createdAt: group.created_at,
     memberCount: group.member_count,
     members: (members.results || []).map(row => ({
@@ -1165,7 +1234,8 @@ async function handleGroupApi(request, env, url, auth) {
   if (url.pathname === "/api/admin/groups") {
     if (request.method === "GET") {
       const result = await env.DB.prepare(`
-        SELECT id, name, description, created_at, updated_at,
+        SELECT id, name, description, picture_data, picture_version, created_at, updated_at,
+          length(picture_data) AS picture_length,
           (SELECT COUNT(*) FROM group_members m WHERE m.group_id = portal_groups.id) AS member_count
         FROM portal_groups
         ORDER BY name COLLATE NOCASE
@@ -1176,6 +1246,8 @@ async function handleGroupApi(request, env, url, auth) {
           id: group.id,
           name: group.name,
           description: group.description,
+          hasPicture: Boolean(group.picture_data),
+          pictureUrl: group.picture_data ? groupPictureUrl(group) : null,
           createdAt: group.created_at,
           memberCount: group.member_count
         }))
@@ -1290,6 +1362,70 @@ async function handleGroupApi(request, env, url, auth) {
     return json({ error: "Method not allowed" }, 405);
   }
 
+  const pictureMatch = url.pathname.match(/^\/api\/admin\/groups\/([^/]+)\/picture$/);
+
+  if (pictureMatch) {
+    const groupId = decodeURIComponent(pictureMatch[1]);
+    if (!groupId || groupId.length > 200) return json({ error: "Invalid group ID" }, 400);
+
+    const group = await env.DB.prepare("SELECT id FROM portal_groups WHERE id = ?")
+      .bind(groupId).first();
+    if (!group) return json({ error: "Group not found" }, 404);
+
+    if (request.method === "PUT") {
+      let form;
+      try {
+        form = await request.formData();
+      } catch {
+        return json({ error: "Choose a valid image file" }, 400);
+      }
+
+      const file = form.get("picture");
+      if (!file || typeof file !== "object" || typeof file.arrayBuffer !== "function") {
+        return json({ error: "Choose an image file" }, 400);
+      }
+      if (!Number.isFinite(file.size) || file.size < 1) {
+        return json({ error: "That file is empty" }, 400);
+      }
+      if (file.size > MAX_PICTURE_BYTES) {
+        return json({ error: "Choose an image smaller than 350 KB" }, 413);
+      }
+
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const type = detectImageType(bytes);
+      if (!type) return json({ error: "Use a PNG, JPEG, WebP or GIF image" }, 415);
+
+      await env.DB.prepare(`
+        UPDATE portal_groups
+        SET picture_data = ?, picture_version = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(toDataUrl(bytes, type), randomToken(9), groupId).run();
+
+      await writeAudit(env, auth.session.id, "admin.group.picture.updated", groupId, {
+        targetType: "group",
+        format: type
+      });
+
+      return json({ ok: true, group: await readGroup(env, groupId) });
+    }
+
+    if (request.method === "DELETE") {
+      await env.DB.prepare(`
+        UPDATE portal_groups
+        SET picture_data = NULL, picture_version = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(randomToken(9), groupId).run();
+
+      await writeAudit(env, auth.session.id, "admin.group.picture.removed", groupId, {
+        targetType: "group"
+      });
+
+      return json({ ok: true, group: await readGroup(env, groupId) });
+    }
+
+    return json({ error: "Method not allowed" }, 405);
+  }
+
   const groupMatch = url.pathname.match(/^\/api\/admin\/groups\/([^/]+)$/);
 
   if (groupMatch) {
@@ -1300,6 +1436,62 @@ async function handleGroupApi(request, env, url, auth) {
       const group = await readGroup(env, groupId);
       if (!group) return json({ error: "Group not found" }, 404);
       return json({ group });
+    }
+
+    // Rename and re-describe.
+    if (request.method === "PATCH") {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+
+      if (!body || typeof body !== "object" || Array.isArray(body) ||
+          Object.keys(body).length === 0 ||
+          Object.keys(body).some(key => !["name", "description"].includes(key))) {
+        return json({ error: "Invalid group details" }, 400);
+      }
+
+      const current = await env.DB.prepare(
+        "SELECT name, description FROM portal_groups WHERE id = ?"
+      ).bind(groupId).first();
+      if (!current) return json({ error: "Group not found" }, 404);
+
+      let name = current.name;
+      if (body.name !== undefined) {
+        name = cleanGroupName(body.name);
+        if (!name) return json({ error: "Group name must be between 1 and 80 characters" }, 400);
+      }
+
+      let description = current.description;
+      if (body.description !== undefined) {
+        if (typeof body.description !== "string" || body.description.length > 500) {
+          return json({ error: "Description must be 500 characters or fewer" }, 400);
+        }
+        description = body.description.trim();
+      }
+
+      if (name === current.name && description === current.description) {
+        return json({ ok: true, group: await readGroup(env, groupId) });
+      }
+
+      try {
+        await env.DB.prepare(`
+          UPDATE portal_groups
+          SET name = ?, description = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).bind(name, description, groupId).run();
+      } catch {
+        return json({ error: "A group with that name already exists" }, 409);
+      }
+
+      await writeAudit(env, auth.session.id, "admin.group.updated", groupId, {
+        targetType: "group",
+        name
+      });
+
+      return json({ ok: true, group: await readGroup(env, groupId) });
     }
 
     if (request.method === "DELETE") {
@@ -1558,11 +1750,21 @@ async function handleAdminApi(request, env, url) {
         LEFT JOIN session_attendance a
           ON a.user_id = u.id AND a.session_id = ?
         WHERE u.status = 'active'
+          AND ${SESSION_AUDIENCE_SQL}
         ORDER BY name COLLATE NOCASE
         LIMIT 500
-      `).bind(sessionId).all();
+      `).bind(
+        sessionId,
+        sessionId, sessionId, sessionId, sessionId
+      ).all();
+
+      const access = await readSessionAccess(env, sessionId);
 
       return json({
+        // Told to the client so an empty register can explain itself instead of
+        // just looking like a bug.
+        restricted: access.restricted,
+        lockedTo: access,
         attendance: (result.results || []).map(row => ({
           userId: row.id,
           name: row.name,
@@ -1636,6 +1838,24 @@ async function handleAdminApi(request, env, url) {
     ).bind(userId).first();
 
     if (!targetUser) return json({ error: "Active user not found" }, 404);
+
+    // A restricted session only accepts marks from its own audience, so the
+    // register and what can be saved to it can never disagree.
+    if (body.status !== "unmarked") {
+      const onSession = await env.DB.prepare(`
+        SELECT 1 AS present FROM users u
+        WHERE u.id = ? AND ${SESSION_AUDIENCE_SQL}
+      `).bind(
+        userId,
+        sessionId, sessionId, sessionId, sessionId
+      ).first();
+
+      if (!onSession) {
+        return json({
+          error: "That member is not on this session. Add them to it first."
+        }, 409);
+      }
+    }
 
     await env.DB.prepare(`
       INSERT INTO session_attendance
@@ -2224,6 +2444,14 @@ export default {
           return await handleProfileApi(request, env, url);
         } catch {
           return json({ error: "Profile request failed" }, 500);
+        }
+      }
+
+      if (url.pathname.startsWith("/api/group-avatars/")) {
+        try {
+          return await serveGroupPicture(request, env, url);
+        } catch {
+          return json({ error: "Group picture request failed" }, 500);
         }
       }
 

@@ -1750,12 +1750,251 @@ test("the profile's scheduled count only includes sessions that member can atten
   const adminStats = (await json(await call(
     harness, "/api/profile", { session: admin }
   ))).stats;
-  assert.equal(adminStats.upcoming, 3, "an administrator can attend every scheduled session");
+  // The profile page is personal, so even an administrator's own count answers
+  // "what can I attend", not "what exists". They are on no group and hold no
+  // direct grant here, so only the open session counts.
+  assert.equal(adminStats.upcoming, 1,
+    "an administrator's own profile still counts only what they may attend");
 
   // The number must agree with the list it is counting.
   const list = await json(await call(harness, "/api/sessions", { session: await harness.signIn(outsider) }));
   const scheduled = list.sessions.filter(item => item.status === "scheduled");
   assert.equal(outsiderStats.upcoming, scheduled.length);
+});
+
+// ---------------------------------------------------------------------------
+// The register only lists the people on the session
+// ---------------------------------------------------------------------------
+
+test("the attendance register lists only the session's audience", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const onIt = await harness.addUser({ displayName: "On it" });
+  const notOnIt = await harness.addUser({ displayName: "Not on it" });
+  const sessionId = await seedCodingSession(harness, admin.userId);
+
+  // Open session: everyone is on it.
+  const open = await json(await call(
+    harness, `/api/admin/sessions/${sessionId}/attendance`, { session: admin }
+  ));
+  assert.equal(open.attendance.length, 3, "an open session still lists every active account");
+  assert.equal(open.restricted, false);
+
+  await call(harness, `/api/admin/sessions/${sessionId}/access/users/${onIt}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ allowed: true })
+  });
+
+  const locked = await json(await call(
+    harness, `/api/admin/sessions/${sessionId}/attendance`, { session: admin }
+  ));
+  assert.equal(locked.restricted, true);
+  assert.deepEqual(
+    locked.attendance.map(row => row.name),
+    ["On it"],
+    "a locked session must not list the whole portal"
+  );
+
+  // The administrator is not magically on the list either.
+  assert.ok(!locked.attendance.some(row => row.name === "Test User" && false));
+});
+
+test("a mark cannot be saved for someone who is not on a locked session", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const onIt = await harness.addUser({ displayName: "On it" });
+  const notOnIt = await harness.addUser({ displayName: "Not on it" });
+  const sessionId = await seedCodingSession(harness, admin.userId);
+
+  await call(harness, `/api/admin/sessions/${sessionId}/access/users/${onIt}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ allowed: true })
+  });
+
+  const refused = await call(harness, `/api/admin/sessions/${sessionId}/attendance/${notOnIt}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ status: "present" })
+  });
+  assert.equal(refused.status, 409);
+  assert.match((await json(refused)).error, /not on this session/i);
+
+  const rows = await harness.DB.prepare(
+    "SELECT COUNT(*) AS count FROM session_attendance WHERE session_id = ?"
+  ).bind(sessionId).first();
+  assert.equal(rows.count, 0, "the refused mark must not be written");
+
+  // Someone who is on it can still be marked.
+  const allowed = await call(harness, `/api/admin/sessions/${sessionId}/attendance/${onIt}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ status: "present" })
+  });
+  assert.equal(allowed.status, 200);
+});
+
+test("a group grant decides the register too", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const inGroup = await harness.addUser({ displayName: "In group" });
+  const notInGroup = await harness.addUser({ displayName: "Outsider" });
+  const sessionId = await seedCodingSession(harness, admin.userId);
+
+  const group = (await json(await call(harness, "/api/admin/groups", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Helm crew" })
+  }))).group;
+
+  await call(harness, `/api/admin/groups/${group.id}/members`, {
+    method: "POST", session: admin, body: JSON.stringify({ userId: inGroup })
+  });
+  await call(harness, `/api/admin/sessions/${sessionId}/access/groups/${group.id}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ allowed: true })
+  });
+
+  const register = await json(await call(
+    harness, `/api/admin/sessions/${sessionId}/attendance`, { session: admin }
+  ));
+  assert.deepEqual(register.attendance.map(row => row.name), ["In group"]);
+
+  // Leaving the group empties the register, and says so rather than looking broken.
+  await call(harness, `/api/admin/groups/${group.id}/members/${inGroup}`, {
+    method: "DELETE", session: admin
+  });
+
+  const afterLeave = await json(await call(
+    harness, `/api/admin/sessions/${sessionId}/attendance`, { session: admin }
+  ));
+  assert.equal(afterLeave.attendance.length, 0);
+  assert.equal(afterLeave.restricted, true);
+});
+
+// ---------------------------------------------------------------------------
+// Editing a group
+// ---------------------------------------------------------------------------
+
+test("a group can be renamed and re-described", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const group = (await json(await call(harness, "/api/admin/groups", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Old name" })
+  }))).group;
+
+  const renamed = await call(harness, `/api/admin/groups/${group.id}`, {
+    method: "PATCH", session: admin,
+    body: JSON.stringify({ name: "  New   name  ", description: "A better description" })
+  });
+
+  assert.equal(renamed.status, 200);
+  const result = (await json(renamed)).group;
+  assert.equal(result.name, "New name");
+  assert.equal(result.description, "A better description");
+
+  const other = (await json(await call(harness, "/api/admin/groups", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Weapons crew" })
+  }))).group;
+
+  for (const patch of [
+    { name: "" },
+    { name: "   " },
+    { name: "x".repeat(81) },
+    { name: 42 },
+    { name: "Weapons crew" },
+    { colour: "red" }
+  ]) {
+    const bad = await call(harness, `/api/admin/groups/${group.id}`, {
+      method: "PATCH", session: admin, body: JSON.stringify(patch)
+    });
+    assert.equal(bad.ok, false, `${JSON.stringify(patch)} must be refused`);
+  }
+
+  // Still refused after all of that.
+  const survivor = await json(await call(harness, `/api/admin/groups/${group.id}`, { session: admin }));
+  assert.equal(survivor.group.name, "New name");
+
+  assert.equal((await call(harness, `/api/admin/groups/${group.id}`, {
+    method: "PATCH", session: admin, body: JSON.stringify({ description: "x".repeat(501) })
+  })).status, 400);
+});
+
+test("a group picture is validated, stored and served, and can be removed", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const member = await harness.signIn(await harness.addUser());
+
+  const group = (await json(await call(harness, "/api/admin/groups", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Helm crew" })
+  }))).group;
+
+  assert.equal(group.hasPicture, false);
+  assert.equal(group.pictureUrl, null);
+
+  const url = `/api/admin/groups/${group.id}/picture`;
+
+  // Wrong format, oversized, and missing credentials are all refused.
+  const svg = await call(harness, url, {
+    method: "PUT", session: admin,
+    body: pictureForm(svgBytes(), "g.svg", "image/svg+xml")
+  });
+  assert.equal(svg.status, 415);
+
+  const big = await call(harness, url, {
+    method: "PUT", session: admin,
+    body: pictureForm(oversizedBytes(), "g.png", "image/png")
+  });
+  assert.equal(big.status, 413);
+
+  const anonymous = await call(harness, url, { method: "PUT", body: pictureForm(pngBytes(), "g.png", "image/png") });
+  assert.equal(anonymous.status, 401);
+
+  const byMember = await call(harness, url, {
+    method: "PUT", session: member,
+    body: pictureForm(pngBytes(), "g.png", "image/png")
+  });
+  assert.equal(byMember.status, 403);
+
+  // A valid one sticks, byte for byte.
+  const bytes = pngBytes([0x12, 0x34, 0x56]);
+  const uploaded = await call(harness, url, {
+    method: "PUT", session: admin, body: pictureForm(bytes, "g.png", "image/png")
+  });
+  assert.equal(uploaded.status, 200);
+  const saved = (await json(uploaded)).group;
+  assert.equal(saved.hasPicture, true);
+  assert.match(saved.pictureUrl, /^\/api\/group-avatars\//);
+
+  const stored = await harness.DB.prepare(
+    "SELECT picture_data FROM portal_groups WHERE id = ?"
+  ).bind(group.id).first();
+  assert.equal(stored.picture_data, expectedDataUrl(bytes, "image/png"));
+
+  const served = await call(harness, saved.pictureUrl, { session: member });
+  assert.equal(served.status, 200);
+  assert.equal(served.headers.get("content-type"), "image/png");
+  assert.deepEqual(Buffer.from(await served.arrayBuffer()), Buffer.from(bytes));
+
+  // Anonymous cannot see it.
+  assert.equal((await call(harness, saved.pictureUrl)).status, 401);
+
+  // Replacing it produces a different URL, so a stale decode cannot linger.
+  const second = pngBytes([0x65, 0x43, 0x21]);
+  const replaced = await call(harness, url, {
+    method: "PUT", session: admin, body: pictureForm(second, "g2.png", "image/png")
+  });
+  const replacedGroup = (await json(replaced)).group;
+  assert.notEqual(replacedGroup.pictureUrl, saved.pictureUrl);
+
+  const removed = await call(harness, url, { method: "DELETE", session: admin });
+  assert.equal(removed.status, 200);
+  const cleared = (await json(removed)).group;
+  assert.equal(cleared.hasPicture, false);
+  assert.equal(cleared.pictureUrl, null);
+  assert.equal((await call(harness, saved.pictureUrl, { session: member })).status, 404);
+});
+
+test("an empty or missing group picture endpoint 404s rather than 500s", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+
+  assert.equal((await call(harness, "/api/group-avatars/nope", { session: admin })).status, 404);
+
+  const group = (await json(await call(harness, "/api/admin/groups", {
+    method: "POST", session: admin, body: JSON.stringify({ name: "Helm crew" })
+  }))).group;
+  assert.equal((await call(harness, `/api/group-avatars/${group.id}`, { session: admin })).status, 404);
 });
 
 // ---------------------------------------------------------------------------

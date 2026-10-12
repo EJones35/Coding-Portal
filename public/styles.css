@@ -1012,3 +1012,72 @@ body.modal-open { overflow: hidden; }
   font-size: .85rem;
 }
 :root[data-theme="light"] .admin-reason-input { background: #fff; border-color: #d9a3a8; color: var(--text); }
+
+/* A user row is picture, name, and nothing else until Edit is pressed. */
+.admin-user-view { gap: .7rem; }
+.admin-user-view > span { font-size: 1rem; line-height: 1.4; }
+.admin-role-badge { color: var(--cyan); font-size: .82rem; white-space: nowrap; }
+.admin-edit-fields { display: grid; gap: .5rem; min-width: 0; }
+.admin-table tr.is-editing { background: rgba(88, 217, 245, .06); }
+.admin-table tr.is-editing .chip-avatar { width: 42px; height: 42px; }
+
+/* The Edit button matches the height of the name line beside it, so the row
+   does not look like it is twice as tall as its contents. */
+.admin-table td:last-child { vertical-align: middle; }
+.admin-table td:last-child .secondary-button {
+  min-height: 2.75rem;
+  height: 2.75rem;
+  padding: 0 .95rem;
+  white-space: nowrap;
+}
+.admin-table tr:not(.is-editing) td { height: 3.5rem; }
+:root[data-theme="light"] .admin-role-badge { color: #086b84; }
+:root[data-theme="light"] .admin-table tr.is-editing { background: #eaf4f8; }
+
+/* Groups: a compact collapsed view, and a full editor behind Edit. */
+.group-card { padding: .9rem; border: 1px solid var(--border); border-radius: 9px; }
+.group-view { display: grid; gap: .7rem; }
+.group-card-heading { display: flex; align-items: center; gap: .8rem; min-width: 0; }
+.group-avatar { width: 42px; height: 42px; font-size: 1.05rem; }
+.group-titles { display: grid; gap: .2rem; min-width: 0; }
+.group-titles h4 { margin: 0; font-size: 1rem; overflow-wrap: anywhere; }
+.group-count { color: var(--muted); font-size: .8rem; }
+.group-actions { display: flex; align-items: center; gap: .55rem; flex-wrap: wrap; }
+.group-actions .secondary-button { margin-top: 0; }
+.group-members-preview { display: flex; flex-wrap: wrap; gap: .35rem; margin: 0; color: var(--muted); font-size: .82rem; }
+.group-member-chip {
+  padding: .2rem .5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: .78rem;
+}
+.group-member-more { color: var(--muted); }
+
+.group-editor { display: grid; gap: .9rem; margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--border); }
+.group-detail-fields { display: grid; gap: .6rem; }
+.group-detail-fields label { display: grid; gap: .3rem; font-size: .85rem; color: var(--muted); }
+.group-detail-fields input {
+  box-sizing: border-box; width: 100%; min-width: 0; padding: .6rem;
+  border: 1px solid var(--border); border-radius: 7px;
+  color: var(--text); background: #0a1220; font: inherit;
+}
+.group-member { padding: .3rem .1rem; }
+.group-member small { color: var(--muted); font-size: .75rem; }
+.group-remove { margin-left: auto; font-size: .82rem; }
+.group-controls { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.group-controls select {
+  flex: 1 1 14rem; min-width: 0; padding: .5rem;
+  border: 1px solid var(--border); border-radius: 7px;
+  color: var(--text); background: #0a1220; font: inherit;
+}
+.group-controls .secondary-button { margin-top: 0; }
+
+:root[data-theme="light"] .group-detail-fields input,
+:root[data-theme="light"] .group-controls select { background: #fff; border-color: var(--border); }
+:root[data-theme="light"] .group-member-chip { background: #f2f7fb; }
+:root[data-theme="light"] .group-editor { border-top-color: var(--border); }
+
+@media (max-width: 640px) {
+  .group-actions { align-items: stretch; flex-direction: column; }
+  .group-actions .secondary-button { width: 100%; }
+}

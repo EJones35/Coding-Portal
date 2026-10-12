@@ -1519,13 +1519,24 @@ async function loadAdmin() {
       const identity = document.createElement("div");
       identity.className = "admin-user-identity";
 
+      // View mode: picture and name, and nothing else until Edit is pressed.
       const who = document.createElement("div");
-      who.className = "member-identity";
+      who.className = "member-identity admin-user-view";
       who.append(createAvatarChip(user));
-      const whoText = document.createElement("span");
-      whoText.textContent = user.name;
-      who.append(whoText);
 
+      const nameText = document.createElement("span");
+      nameText.textContent = user.name;
+      who.append(nameText);
+
+      // Only administrators carry the suffix. Nothing at all for anyone else.
+      if (user.role === "admin") {
+        const badge = document.createElement("span");
+        badge.className = "admin-role-badge";
+        badge.textContent = "- Administrator";
+        who.append(badge);
+      }
+
+      // Edit mode fields, hidden until then.
       const name = document.createElement("input");
       name.className = "admin-name-input";
       name.maxLength = 80;
@@ -1577,7 +1588,12 @@ async function loadAdmin() {
       const meta = document.createElement("small");
       meta.textContent = user.id;
 
-      identity.append(who, emailRow, name, reason, meta);
+      const editFields = document.createElement("div");
+      editFields.className = "admin-edit-fields";
+      editFields.append(emailRow, name, reason, meta);
+      editFields.hidden = true;
+
+      identity.append(who, editFields);
       userCell.append(identity);
 
       const roleCell = document.createElement("td");
@@ -1614,13 +1630,21 @@ async function loadAdmin() {
       cancel.hidden = true;
 
       function setEditing(enabled) {
+        // In view mode the row is picture and name, full stop.
+        who.hidden = enabled;
+        editFields.hidden = !enabled;
+        roleCell.hidden = !enabled;
+        statusCell.hidden = !enabled;
+
         name.disabled = !enabled;
         role.disabled = !enabled;
         status.disabled = !enabled;
         reason.disabled = !enabled;
+
         edit.hidden = enabled;
         save.hidden = !enabled;
         cancel.hidden = !enabled;
+        row.classList.toggle("is-editing", enabled);
       }
 
       // The reason box only means anything while the account is blocked.
@@ -1776,30 +1800,105 @@ function renderGroups(allUsers) {
     card.className = "group-card";
     card.dataset.groupId = group.id;
 
+    // --- View mode: picture, name, member count, and the buttons -----------
+    const view = document.createElement("div");
+    view.className = "group-view";
+
     const heading = document.createElement("div");
     heading.className = "group-card-heading";
+
+    const avatar = document.createElement("span");
+    avatar.className = "account-avatar group-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    if (group.pictureUrl) {
+      const image = document.createElement("img");
+      image.alt = "";
+      image.addEventListener("error", () => {
+        avatar.replaceChildren();
+        avatar.classList.remove("has-image");
+        avatar.textContent = initialFor(group.name);
+      }, { once: true });
+      image.src = group.pictureUrl;
+      avatar.append(image);
+      avatar.classList.add("has-image");
+    } else {
+      avatar.textContent = initialFor(group.name);
+    }
+
+    const titles = document.createElement("div");
+    titles.className = "group-titles";
     const title = document.createElement("h4");
     title.textContent = group.name;
     const count = document.createElement("span");
     count.className = "group-count";
-    count.textContent = `${group.memberCount} member(s)`;
-    heading.append(title, count);
-    card.append(heading);
+    count.textContent = `${group.memberCount} member${group.memberCount === 1 ? "" : "s"}`;
+    titles.append(title, count);
 
-    if (group.description) {
-      const description = document.createElement("p");
-      description.className = "group-description";
-      description.textContent = group.description;
-      card.append(description);
-    }
+    heading.append(avatar, titles);
 
-    const members = document.createElement("div");
-    members.className = "group-members";
-    members.dataset.groupMembers = "";
-    card.append(members);
+    const actions = document.createElement("div");
+    actions.className = "group-actions";
 
-    const controls = document.createElement("div");
-    controls.className = "group-controls";
+    const toggle = createActionButton("Minimise");
+    toggle.dataset.groupMinimise = "";
+    toggle.setAttribute("aria-expanded", "true");
+
+    const editButton = createActionButton("Edit");
+
+    actions.append(toggle, editButton);
+    view.append(heading, actions);
+
+    const preview = document.createElement("p");
+    preview.className = "group-members-preview";
+    view.append(preview);
+
+    // --- Edit mode --------------------------------------------------------
+    const editor = document.createElement("div");
+    editor.className = "group-editor";
+    editor.hidden = true;
+
+    const nameInput = document.createElement("input");
+    nameInput.value = group.name;
+    nameInput.maxLength = 80;
+    nameInput.setAttribute("aria-label", "Group name");
+
+    const descriptionInput = document.createElement("input");
+    descriptionInput.value = group.description || "";
+    descriptionInput.maxLength = 500;
+    descriptionInput.placeholder = "Description";
+    descriptionInput.setAttribute("aria-label", "Group description");
+
+    const pictureInput = document.createElement("input");
+    pictureInput.type = "file";
+    pictureInput.accept = "image/png,image/jpeg,image/webp,image/gif";
+    pictureInput.setAttribute("aria-label", "Group picture");
+
+    const pictureNote = document.createElement("p");
+    pictureNote.className = "settings-help";
+    pictureNote.textContent = "PNG, JPEG, WebP or GIF, up to 350 KB.";
+
+    const removePicture = document.createElement("button");
+    removePicture.type = "button";
+    removePicture.className = "text-button";
+    removePicture.textContent = "Remove group picture";
+    removePicture.hidden = !group.hasPicture;
+
+    const detailFields = document.createElement("div");
+    detailFields.className = "group-detail-fields";
+    detailFields.append(
+      labelled("Name", nameInput),
+      labelled("Description", descriptionInput),
+      labelled("Picture", pictureInput),
+      pictureNote,
+      removePicture
+    );
+
+    const membersBox = document.createElement("div");
+    membersBox.className = "group-members";
+    membersBox.dataset.groupMembers = "";
+
+    const memberControls = document.createElement("div");
+    memberControls.className = "group-controls";
 
     const picker = document.createElement("select");
     picker.setAttribute("aria-label", "Add a member to " + group.name);
@@ -1818,11 +1917,62 @@ function renderGroups(allUsers) {
       addMember(group.id, picker.value, state);
     });
 
-    const remove = createActionButton("Delete group");
-    remove.classList.add("danger-link");
-    remove.addEventListener("click", async () => {
-      if (!window.confirm(`Delete the group "${group.name}"? Members are not removed from the portal.`)) return;
-      remove.disabled = true;
+    memberControls.append(picker, add, state);
+
+    const editorActions = document.createElement("div");
+    editorActions.className = "group-actions";
+
+    const save = createActionButton("Save details");
+    save.addEventListener("click", async () => {
+      save.disabled = true;
+      state.classList.remove("error");
+
+      try {
+        const changes = {};
+        if (nameInput.value.trim() !== group.name) changes.name = nameInput.value;
+        if (descriptionInput.value.trim() !== (group.description || "")) {
+          changes.description = descriptionInput.value;
+        }
+
+        if (Object.keys(changes).length) {
+          await apiFetch("/api/admin/groups/" + encodeURIComponent(group.id), {
+            method: "PATCH",
+            body: JSON.stringify(changes)
+          }, "Group update");
+        }
+
+        // Always upload if a file was chosen; always clear if asked.
+        if (pictureInput.files && pictureInput.files[0]) {
+          const form = new FormData();
+          form.append("picture", pictureInput.files[0]);
+          await apiFetch("/api/admin/groups/" + encodeURIComponent(group.id) + "/picture", {
+            method: "PUT",
+            body: form
+          }, "Group picture");
+        } else if (removePicture.dataset.armed === "yes") {
+          await apiFetch("/api/admin/groups/" + encodeURIComponent(group.id) + "/picture", {
+            method: "DELETE"
+          }, "Group picture");
+        }
+
+        pictureInput.value = "";
+        showGroupsMessage(`Saved "${nameInput.value.trim()}".`);
+        await loadGroups();
+      } catch (error) {
+        state.textContent = error.message;
+        state.classList.add("error");
+      } finally {
+        save.disabled = false;
+      }
+    });
+
+    const close = createActionButton("Close");
+    close.addEventListener("click", () => setGroupEditing(card, false));
+
+    const deleteGroup = createActionButton("Delete group");
+    deleteGroup.classList.add("danger-link");
+    deleteGroup.addEventListener("click", async () => {
+      deleteGroup.disabled = true;
       try {
         await apiFetch("/api/admin/groups/" + encodeURIComponent(group.id), {
           method: "DELETE"
@@ -1830,20 +1980,129 @@ function renderGroups(allUsers) {
         showGroupsMessage(`Deleted "${group.name}".`);
         await loadGroups();
       } catch (error) {
-        remove.disabled = false;
-        showGroupsMessage(error.message, true);
+        deleteGroup.disabled = false;
+        state.textContent = error.message;
+        state.classList.add("error");
       }
     });
 
-    controls.append(picker, add, state, remove);
-    card.append(controls);
+    editorActions.append(close, save, deleteGroup);
+
+    removePicture.addEventListener("click", () => {
+      if (removePicture.dataset.armed === "yes") {
+        delete removePicture.dataset.armed;
+        removePicture.textContent = "Remove group picture";
+        return;
+      }
+      removePicture.dataset.armed = "yes";
+      removePicture.textContent = "Save details to apply this";
+      setTimeout(() => {
+        if (removePicture.dataset.armed === "yes") {
+          delete removePicture.dataset.armed;
+          removePicture.textContent = "Remove group picture";
+        }
+      }, 6000);
+    });
+
+    editor.append(detailFields, membersBox, memberControls, editorActions);
+
+    let editing = false;
+    let minimised = Boolean(readUiState().collapsedGroups && readUiState().collapsedGroups[group.id]);
+
+    const body = document.createElement("div");
+    body.className = "group-body";
+    body.hidden = minimised;
+    body.append(editor);
+
+    card.append(view, body);
+
+    function setGroupEditing(target, on) {
+      editing = on;
+      card.classList.toggle("is-editing", on);
+      view.hidden = on;
+      body.hidden = minimised || !on;
+      editButton.hidden = on;
+
+      if (on) {
+        nameInput.focus();
+        // Members are only fetched once the editor is actually open.
+        loadGroupMembers(group.id, allUsers, picker);
+      }
+    }
+
+    editButton.addEventListener("click", () => setGroupEditing(card, true));
+
+    toggle.addEventListener("click", () => {
+      minimised = !minimised;
+      body.hidden = minimised || editing;
+      toggle.setAttribute("aria-expanded", String(!minimised));
+      toggle.textContent = minimised ? "Expand" : "Minimise";
+      setGroupMinimised(group.id, minimised);
+      if (!minimised) loadPreview(group, preview, allUsers);
+    });
+
+    card.__setMinimised = on => {
+      minimised = on;
+      body.hidden = minimised || editing;
+      toggle.setAttribute("aria-expanded", String(!minimised));
+      toggle.textContent = minimised ? "Expand" : "Minimise";
+    };
 
     groupsList.append(card);
+    loadPreview(group, preview, allUsers);
+  }
+}
+function labelled(text, input) {
+  const label = document.createElement("label");
+  label.append(document.createTextNode(text), input);
+  return label;
+}
 
-    loadGroupMembers(group.id, allUsers, picker);
+function setGroupMinimised(groupId, minimised) {
+  const state = readUiState().collapsedGroups || {};
+  if (minimised) state[groupId] = true;
+  else delete state[groupId];
+  writeUiState({ collapsedGroups: state });
+}
+
+// The collapsed view still needs to show who is in the group, so it asks the
+// same endpoint the editor uses.
+async function loadPreview(group, target, allUsers) {
+  try {
+    const { group: full } = await apiFetch(
+      "/api/admin/groups/" + encodeURIComponent(group.id) + "/members", {}, "Group"
+    );
+
+    target.replaceChildren();
+
+    if (!full.members.length) {
+      const empty = document.createElement("span");
+      empty.textContent = "No members yet.";
+      target.append(empty);
+      return;
+    }
+
+    for (const member of full.members) {
+      const chip = document.createElement("span");
+      chip.className = "group-member-chip";
+      chip.textContent = member.name;
+      target.append(chip);
+    }
+
+    const overflow = document.createElement("span");
+    overflow.className = "group-member-more";
+    const shown = Math.min(full.members.length, 8);
+    overflow.textContent = shown < full.members.length
+      ? `+${full.members.length - shown} more`
+      : "";
+    target.append(overflow);
+  } catch {
+    target.textContent = "";
   }
 }
 
+// Fills the editor's member list and the "add a member" picker. Called when a
+// group is opened for editing, and again after any change to its membership.
 async function loadGroupMembers(groupId, allUsers, picker) {
   const container = groupsList.querySelector(`[data-group-id="${groupId}"] [data-group-members]`);
   if (!container) return;
@@ -1901,24 +2160,30 @@ async function loadGroupMembers(groupId, allUsers, picker) {
       container.append(row);
     }
 
-    // Anything in this group is not offered again.
-    const inside = new Set(group.members.map(member => member.id));
-    picker.replaceChildren();
-
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = "Select a member to add...";
-    picker.append(placeholder);
-
-    for (const user of allUsers) {
-      if (inside.has(user.id) || user.status !== "active") continue;
-      const option = document.createElement("option");
-      option.value = user.id;
-      option.textContent = user.name;
-      picker.append(option);
-    }
+    // Everyone not already in this group, so the picker never offers the same
+    // person twice. Scoped to this group's own picker on purpose.
+    fillMemberPicker(picker, group.members, allUsers);
   } catch (error) {
     container.textContent = error.message;
+  }
+}
+
+function fillMemberPicker(picker, members, allUsers) {
+  const inside = new Set(members.map(member => member.id));
+
+  picker.replaceChildren();
+
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Select a member to add...";
+  picker.append(placeholder);
+
+  for (const user of allUsers) {
+    if (inside.has(user.id) || user.status !== "active") continue;
+    const option = document.createElement("option");
+    option.value = user.id;
+    option.textContent = user.name;
+    picker.append(option);
   }
 }
 
