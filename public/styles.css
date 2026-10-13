@@ -466,6 +466,16 @@ h2 { margin: 12px 0; font-weight: 500; }
 }
 .session-form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
 .sessions-list { display: grid; gap: 1rem; min-width: 0; }
+
+/* Upcoming and past are two lists, not one long one. The history folds away by
+   default, so a portal with a term's worth of finished sessions behind it still
+   opens on what is actually next - and one click still gets the rest. */
+.session-group { display: grid; gap: .8rem; min-width: 0; }
+.session-group-heading { display: flex; align-items: center; justify-content: space-between; gap: .8rem; flex-wrap: wrap; }
+.session-group-title { margin: 0; font-size: 1.02rem; }
+.session-group-heading .secondary-button { margin-top: 0; min-height: 34px; padding: 6px 12px; }
+.session-group-list { gap: 1rem; }
+.session-group-empty { margin: 0; }
 .session-card h3 { margin: 0; overflow-wrap: anywhere; }
 .session-card-heading, .session-actions { display: flex; align-items: center; gap: .7rem; flex-wrap: wrap; }
 .session-card p { overflow-wrap: anywhere; }
@@ -1262,6 +1272,34 @@ body.modal-open { overflow: hidden; }
 .achievement-card p { margin: .4rem 0 0; color: var(--muted); font-size: .82rem; line-height: 1.55; }
 .achievement-state { color: var(--muted); font-size: .74rem; letter-spacing: .1em; text-transform: uppercase; }
 .achievement-card.is-earned .achievement-state { color: var(--cyan); }
+
+/* The visibility list and the award list are one checkbox row and one button row
+   for every person, for every achievement. Folded behind a summary line, the
+   two facts that matter - who can see it, and who has earned it - are readable
+   without opening a wall of controls. */
+.achievement-fold { display: grid; gap: .55rem; margin-top: .6rem; }
+.achievement-fold-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .8rem;
+  width: 100%;
+  margin-top: 0;
+  text-align: left;
+}
+.achievement-fold-summary { overflow-wrap: anywhere; }
+.achievement-fold-caret {
+  flex: none;
+  color: var(--muted);
+  font-size: .74rem;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.achievement-fold-body { display: grid; gap: .5rem; }
+.achievement-fold-label { color: var(--muted); font-size: .8rem; }
+.achievement-picture-block { display: grid; gap: .45rem; margin-top: .6rem; }
+.achievement-progress { margin: 0 0 .7rem; color: var(--muted); font-size: .85rem; }
 
 .achievements-list { display: grid; gap: .9rem; }
 .achievement-admin-card {

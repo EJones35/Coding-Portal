@@ -2416,3 +2416,164 @@ test("the deployed origin serves the portal shell for non-API paths", async () =
 
   assert.equal(response.status, 200);
 });
+
+// ---------------------------------------------------------------------------
+// Upcoming / past sessions, and the achievement visibility summaries
+//
+// These helpers live in public/app.js, which cannot be imported into Node
+// because it wires itself to the real document on load. The bodies are pure and
+// touch no DOM, so they are lifted out of the source and *executed* here. That
+// is deliberately stronger than matching their text: a split that stopped
+// separating completed sessions would fail this rather than pass it.
+// ---------------------------------------------------------------------------
+
+function appSource() {
+  return readFileSync(fileURLToPath(new URL("../public/app.js", import.meta.url)), "utf8");
+}
+
+function loadAppFunction(name) {
+  const source = appSource();
+  const body = source.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
+  assert.ok(body, `${name} must exist in public/app.js`);
+  return new Function(`${body[0]}; return ${name};`)();
+}
+
+test("a completed session leaves the upcoming list and joins the history", () => {
+  const splitSessions = loadAppFunction("splitSessions");
+
+  const { upcoming, past } = splitSessions([
+    { id: "a", status: "scheduled" },
+    { id: "b", status: "completed" },
+    { id: "c", status: "scheduled" },
+    { id: "d", status: "cancelled" }
+  ]);
+
+  assert.deepEqual(upcoming.map(s => s.id), ["a", "c"], "scheduled sessions are upcoming");
+  assert.deepEqual(past.map(s => s.id), ["b", "d"], "completed and cancelled sessions are history");
+});
+
+test("completing a session keeps the record rather than dropping it", () => {
+  const splitSessions = loadAppFunction("splitSessions");
+
+  const before = splitSessions([{ id: "only", status: "scheduled" }]);
+  assert.equal(before.upcoming.length, 1);
+  assert.equal(before.past.length, 0);
+
+  const after = splitSessions([{ id: "only", status: "completed" }]);
+  assert.equal(after.upcoming.length, 0, "it stops being upcoming");
+  assert.equal(after.past.length, 1, "it is still in the history");
+  assert.equal(after.past[0].id, "only", "the same record, not a summary standing in for one");
+});
+
+test("an empty portal still returns two empty buckets, not a crash", () => {
+  const splitSessions = loadAppFunction("splitSessions");
+  assert.deepEqual(splitSessions([]), { upcoming: [], past: [] });
+  assert.deepEqual(splitSessions(undefined), { upcoming: [], past: [] });
+});
+
+test("session status values are shown as words, not raw database values", () => {
+  const source = appSource();
+
+  const labels = source.match(/const SESSION_STATUS_LABELS = \{[\s\S]*?\n\};/);
+  const body = source.match(/function sessionStatusLabel\([^)]*\) \{[\s\S]*?\n\}/);
+  assert.ok(labels, "SESSION_STATUS_LABELS must exist");
+  assert.ok(body, "sessionStatusLabel must exist");
+
+  const label = new Function(`${labels[0]} ${body[0]}; return sessionStatusLabel;`)();
+
+  assert.equal(label("scheduled"), "Scheduled");
+  assert.equal(label("completed"), "Completed");
+  assert.equal(label("cancelled"), "Cancelled");
+  assert.equal(label("some-future-status"), "some-future-status",
+    "an unrecognised status is shown as-is rather than swallowed");
+});
+
+test("the achievement summary says who can see it without opening the list", () => {
+  const summarise = loadAppFunction("visibilitySummaryText");
+
+  assert.equal(summarise("everyone", new Map(), new Map()), "Shown to everyone");
+
+  assert.equal(
+    summarise("everyone", new Map([["u1", false]]), new Map()),
+    "Shown to everyone except 1",
+    "someone hidden from an everyone achievement is counted as an exception"
+  );
+
+  assert.equal(
+    summarise("everyone", new Map(), new Map([["g1", false]])),
+    "Shown to everyone except 1",
+    "a hidden group counts too, not only hidden people"
+  );
+
+  assert.equal(summarise("restricted", new Map(), new Map()), "Shown to nobody yet");
+
+  assert.equal(
+    summarise("restricted", new Map([["u1", true], ["u2", true]]), new Map()),
+    "Shown to 2 people"
+  );
+
+  assert.equal(
+    summarise("restricted", new Map([["u1", true]]), new Map()),
+    "Shown to 1 person",
+    "one is singular"
+  );
+
+  assert.equal(
+    summarise("restricted", new Map([["u1", true], ["u2", true]]), new Map([["g1", true], ["g2", true]])),
+    "Shown to 2 people and 2 groups",
+    "both kinds of subject are counted and named"
+  );
+});
+
+test("the session list renders an upcoming group and a foldable past group", () => {
+  const app = appSource();
+
+  assert.match(app, /function renderSessionGroups\(\)/);
+  assert.match(app, /grid\.id = "sessions-" \+ bucket/);
+
+  // The history is folded away on load rather than dumped under the upcoming
+  // sessions, and that choice is remembered like every other view preference.
+  assert.match(app, /rememberPastCollapsed/);
+  assert.match(app, /syncSessionGroup\(past, \{ collapsed: pastSectionCollapsed\(\) \}\);/);
+});
+
+test("completing a session moves its card between the lists instead of reloading", () => {
+  const app = appSource();
+
+  assert.match(app, /function moveSessionCard\(card, status\)/);
+  assert.match(app, /if \(wasPast !== isPast\) \{[\s\S]*?moveSessionCard\(card, session\.status\);/);
+
+  // The reload is deliberately not used here. Reloading the list is what used to
+  // collapse the attendance panel out from under whoever was working in it, so
+  // the move has to be a DOM move.
+  const moveBlock = app.match(/function moveSessionCard\(card, status\) \{[\s\S]*?\n\}/);
+  assert.ok(moveBlock);
+  assert.equal(moveBlock[0].includes("loadSessions("), false,
+    "moveSessionCard must not reload the session list");
+});
+
+test("an administrator can complete a session in one click", () => {
+  const app = appSource();
+
+  assert.match(app, /item\.status === "scheduled" \? "Mark completed" : "Reopen"/);
+  assert.match(app, /complete\.dataset\.sessionComplete = ""/);
+  assert.match(app, /actions\.append\(edit, attendance, complete, select\)/);
+});
+
+test("switching an achievement's visibility mode re-checks and re-labels the list", () => {
+  const app = appSource();
+
+  // A checkbox means "can see this", which is opposite in the two modes, so
+  // switching has to reconcile them rather than leave the old reading on screen.
+  assert.match(app, /function syncVisibilityBoxes\(mode\)/);
+  assert.match(app, /syncVisibilityBoxes\(item\.mode\);\s*\n\s*visibilityLabel\.textContent/);
+  assert.match(app, /syncVisibilitySummary\(\);/);
+});
+
+test("the achievement detail lists fold closed by default", () => {
+  const app = appSource();
+
+  assert.match(app, /const detailsOpen = !achievementFoldCollapsed\(item\.id\);/);
+  assert.match(app, /visibilityFold\.sync\(detailsOpen\);\s*\n\s*winnersFold\.sync\(detailsOpen\);/);
+  assert.match(app, /function rememberAchievementFold\(id, collapsed\)/);
+});

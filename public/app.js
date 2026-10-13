@@ -952,6 +952,154 @@ function sessionDate(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+const SESSION_STATUS_LABELS = {
+  scheduled: "Scheduled",
+  completed: "Completed",
+  cancelled: "Cancelled"
+};
+
+function sessionStatusLabel(value) {
+  return SESSION_STATUS_LABELS[value] || value || "Scheduled";
+}
+
+// Completing a session is not deleting it. It is the difference between "still
+// to come" and "already happened": the session keeps its attendance, its
+// history and its visibility, and it stops sitting in the upcoming list. Nothing
+// is lost by completing something, which is why the past list is one click away
+// rather than gone.
+function splitSessions(sessions) {
+  const upcoming = [];
+  const past = [];
+  for (const item of sessions || []) {
+    if (item.status === "scheduled") upcoming.push(item);
+    else past.push(item);
+  }
+  return { upcoming, past };
+}
+
+function sessionBucketFor(status) {
+  return status === "scheduled" ? "upcoming" : "past";
+}
+
+let sessionGroupUpcoming = null;
+let sessionGroupPast = null;
+
+// Whether the history is folded away is a fact about how this browser likes the
+// portal, so it is remembered with everything else under `csp-ui`.
+function pastSectionCollapsed() {
+  return Boolean((readUiState().collapsed || {}).sessionsPast);
+}
+
+function rememberPastCollapsed(collapsed) {
+  const state = readUiState().collapsed || {};
+  if (collapsed) state.sessionsPast = true;
+  else delete state.sessionsPast;
+  writeUiState({ collapsed: state });
+}
+
+function buildSessionGroup(bucket, title, emptyText) {
+  const section = document.createElement("section");
+  section.className = "session-group";
+
+  const heading = document.createElement("div");
+  heading.className = "session-group-heading";
+
+  const label = document.createElement("h3");
+  label.className = "session-group-title";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "secondary-button";
+  toggle.setAttribute("aria-expanded", "true");
+  toggle.setAttribute("aria-controls", "sessions-" + bucket);
+
+  heading.append(label, toggle);
+
+  const empty = document.createElement("p");
+  empty.className = "empty-state session-group-empty";
+  empty.textContent = emptyText;
+
+  const grid = document.createElement("div");
+  grid.className = "sessions-list session-group-list";
+  grid.id = "sessions-" + bucket;
+
+  section.append(heading, empty, grid);
+
+  return { bucket, section, label, toggle, empty, grid, count: 0 };
+}
+
+function syncSessionGroup(group, { collapsed } = {}) {
+  if (!group) return;
+  const title = group.bucket === "upcoming" ? "Upcoming" : "Past";
+  group.label.textContent = `${title} (${group.count})`;
+  group.empty.hidden = group.count > 0;
+  const folded = collapsed === undefined ? group.grid.hidden : collapsed;
+  group.grid.hidden = folded;
+  group.toggle.setAttribute("aria-expanded", String(!folded));
+  group.toggle.textContent = folded ? "Show" : "Hide";
+}
+
+function renderSessionGroups() {
+  sessionsList.replaceChildren();
+  sessionGroupUpcoming = null;
+  sessionGroupPast = null;
+
+  const upcoming = buildSessionGroup(
+    "upcoming",
+    "Upcoming",
+    "Nothing scheduled. Anything you add will show up here."
+  );
+  const past = buildSessionGroup(
+    "past",
+    "Past",
+    "No sessions have been completed or cancelled yet."
+  );
+
+  for (const group of [upcoming, past]) {
+    group.toggle.addEventListener("click", () => {
+      const opening = group.grid.hidden;
+      group.grid.hidden = !opening;
+      group.toggle.setAttribute("aria-expanded", String(opening));
+      group.toggle.textContent = opening ? "Hide" : "Show";
+      if (group === past) rememberPastCollapsed(!opening);
+    });
+    sessionsList.append(group.section);
+  }
+
+  sessionGroupUpcoming = upcoming;
+  sessionGroupPast = past;
+
+  syncSessionGroup(upcoming);
+  // A remembered "history folded away" is honoured on load, so a portal that was
+  // left tidy stays tidy after a refresh.
+  syncSessionGroup(past, { collapsed: pastSectionCollapsed() });
+}
+
+// Put a card in the bucket its status belongs to. Used both when the list is
+// first built and when an administrator completes or reopens a session, so the
+// card travels between the two lists in place rather than being re-fetched -
+// reloading is what used to collapse the attendance panel out from under people.
+function routeSessionCard(card, status) {
+  const group = sessionBucketFor(status) === "upcoming" ? sessionGroupUpcoming : sessionGroupPast;
+  if (!group) {
+    sessionsList.append(card);
+    return;
+  }
+  group.grid.append(card);
+  group.count += 1;
+  syncSessionGroup(group);
+}
+
+function moveSessionCard(card, status) {
+  const from = card.dataset.sessionPast === "yes" ? sessionGroupPast : sessionGroupUpcoming;
+  const to = sessionBucketFor(status) === "upcoming" ? sessionGroupUpcoming : sessionGroupPast;
+  if (from && from !== to) {
+    from.count = Math.max(0, from.count - 1);
+    syncSessionGroup(from);
+  }
+  routeSessionCard(card, status);
+}
+
 async function loadSessions() {
   sessionsPanel.hidden = false;
   sessionsMessage("Loading sessions...");
@@ -980,12 +1128,23 @@ async function loadSessions() {
       sessionsMessage("No sessions have been scheduled yet.");
       return;
     }
-    sessionsMessage(`${sessionsCache.length} session(s) found.`);
+
+    // Two lists rather than one long one: what is still to come, and what has
+    // already happened. Completing a session moves it down rather than making
+    // it vanish, so the record survives.
+    renderSessionGroups();
+    const buckets = splitSessions(sessionsCache);
+    sessionsMessage(
+      buckets.upcoming.length
+        ? `${buckets.upcoming.length} upcoming, ${buckets.past.length} past.`
+        : `Nothing scheduled. ${buckets.past.length} session(s) in the history below.`
+    );
 
     for (const item of sessionsCache) {
       const card = document.createElement("article");
       card.className = "session-card";
       card.dataset.sessionId = item.id;
+      card.dataset.sessionPast = item.status === "scheduled" ? "no" : "yes";
 
       const heading = document.createElement("div");
       heading.className = "session-card-heading";
@@ -994,7 +1153,7 @@ async function loadSessions() {
       title.dataset.sessionTitle = "";
       const status = document.createElement("span");
       status.className = "session-status status-" + item.status;
-      status.textContent = item.status;
+      status.textContent = sessionStatusLabel(item.status);
       heading.append(title, status);
 
       if (item.restricted) {
@@ -1059,10 +1218,33 @@ async function loadSessions() {
         for (const value of ["scheduled", "completed", "cancelled"]) {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = value;
+          option.textContent = sessionStatusLabel(value);
           option.selected = value === item.status;
           select.append(option);
         }
+
+        // One click for the common case. The dropdown is still there for
+        // cancelling and for putting something back, but "we finished that one"
+        // should not require finding a select and reading three raw values.
+        const complete = createActionButton(
+          item.status === "scheduled" ? "Mark completed" : "Reopen"
+        );
+        complete.dataset.sessionComplete = "";
+        complete.addEventListener("click", async () => {
+          complete.disabled = true;
+          const next = item.status === "scheduled" ? "completed" : "scheduled";
+          try {
+            const result = await apiFetch("/api/admin/sessions/" + encodeURIComponent(item.id), {
+              method: "PATCH",
+              body: JSON.stringify({ status: next })
+            }, "Session update");
+            applySessionUpdate(result.session);
+            if (editingSessionId === item.id) setEditState("Saved");
+          } catch (error) {
+            complete.disabled = false;
+            sessionsMessage(error.message, true);
+          }
+        });
         // Saved the moment it changes. Deliberately no list reload: reloading
         // used to collapse the attendance panel out from under the user.
         select.addEventListener("change", async () => {
@@ -1079,7 +1261,7 @@ async function loadSessions() {
           }
         });
 
-        actions.append(edit, attendance, select);
+        actions.append(edit, attendance, complete, select);
         card.append(actions);
 
         const access = createActionButton("Who can see this");
@@ -1100,7 +1282,7 @@ async function loadSessions() {
         card.append(buildAccessPanel(item));
       }
 
-      sessionsList.append(card);
+      routeSessionCard(card, item.status);
     }
   } catch (error) {
     sessionsList.replaceChildren();
@@ -1275,8 +1457,23 @@ function applySessionUpdate(session) {
 
   const badge = card.querySelector(".session-status");
   if (badge) {
-    badge.textContent = session.status;
+    badge.textContent = sessionStatusLabel(session.status);
     badge.className = "session-status status-" + session.status;
+  }
+
+  const complete = card.querySelector("[data-session-complete]");
+  if (complete) {
+    complete.textContent = session.status === "scheduled" ? "Mark completed" : "Reopen";
+  }
+
+  // A status change that crosses the upcoming/past boundary moves the card in
+  // place. It is deliberately not a list reload: reloading used to collapse the
+  // attendance panel out from under whoever was working in it.
+  const wasPast = card.dataset.sessionPast === "yes";
+  const isPast = session.status !== "scheduled";
+  if (wasPast !== isPast) {
+    card.dataset.sessionPast = isPast ? "yes" : "no";
+    moveSessionCard(card, session.status);
   }
 
   const description = card.querySelector("[data-session-description]");
@@ -1896,6 +2093,15 @@ async function loadMyAchievements() {
     const grid = document.createElement("div");
     grid.className = "achievement-grid";
 
+    // One line of progress beats making somebody count their own badges.
+    if (list.length > 1) {
+      const earned = list.filter(item => item.earned).length;
+      const progress = document.createElement("p");
+      progress.className = "achievement-progress";
+      progress.textContent = `${earned} of ${list.length} earned`;
+      target.insertBefore(progress, grid);
+    }
+
     for (const item of list) {
       const card = document.createElement("article");
       card.className = "achievement-card" + (item.earned ? " is-earned" : "");
@@ -1944,6 +2150,80 @@ async function loadAchievements() {
     el("#achievements-list").replaceChildren();
     showAchievementsMessage(error.message, true);
   }
+}
+
+// The visibility list and the award list are a checkbox row and a button row for
+// every person, for every achievement. With a handful of members and a few
+// achievements that is a wall of controls, and the two facts that actually
+// matter - who can see this, and who has earned it - are invisible above it.
+// Both fold away behind one summary line, remembered per achievement alongside
+// everything else in `csp-ui`.
+function achievementFold(summaryText, content, onToggle) {
+  const wrap = document.createElement("div");
+  wrap.className = "achievement-fold";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "secondary-button achievement-fold-toggle";
+  toggle.setAttribute("aria-expanded", "false");
+
+  const summary = document.createElement("span");
+  summary.className = "achievement-fold-summary";
+  summary.textContent = summaryText;
+
+  const caret = document.createElement("span");
+  caret.className = "achievement-fold-caret";
+  caret.setAttribute("aria-hidden", "true");
+
+  toggle.append(summary, caret);
+
+  const body = document.createElement("div");
+  body.className = "achievement-fold-body";
+  body.append(content);
+
+  function sync(open) {
+    body.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    caret.textContent = open ? "Hide" : "Show";
+  }
+
+  toggle.addEventListener("click", () => {
+    const opening = body.hidden;
+    sync(opening);
+    if (onToggle) onToggle(opening);
+  });
+
+  wrap.append(toggle, body);
+  return { wrap, body, toggle, summary, sync };
+}
+
+function achievementFoldCollapsed(id) {
+  const folds = readUiState().achievementFolds || {};
+  return folds[id] === true;
+}
+
+function rememberAchievementFold(id, collapsed) {
+  const folds = { ...(readUiState().achievementFolds || {}) };
+  if (collapsed) folds[id] = true;
+  else delete folds[id];
+  writeUiState({ achievementFolds: folds });
+}
+
+// One line that says what the checkboxes underneath currently mean, so the
+// admin never has to open a list of twenty checkboxes to read one fact.
+function visibilitySummaryText(mode, userHidden, groupHidden) {
+  if (mode === "restricted") {
+    const people = [...userHidden.values()].filter(Boolean).length;
+    const groups = [...groupHidden.values()].filter(Boolean).length;
+    if (!people && !groups) return "Shown to nobody yet";
+    const parts = [];
+    if (people) parts.push(`${people} ${people === 1 ? "person" : "people"}`);
+    if (groups) parts.push(`${groups} ${groups === 1 ? "group" : "groups"}`);
+    return `Shown to ${parts.join(" and ")}`;
+  }
+  const hidden = [...userHidden.values()].filter(value => !value).length
+    + [...groupHidden.values()].filter(value => !value).length;
+  return hidden ? `Shown to everyone except ${hidden}` : "Shown to everyone";
 }
 
 function renderAchievements(achievements, allUsers, allGroups) {
@@ -2062,6 +2342,14 @@ function renderAchievements(achievements, allUsers, allGroups) {
         state.textContent = mode.value === "restricted"
           ? "Now only the listed people and groups can see it"
           : "Now shown to everyone except anyone hidden";
+        // The same checkboxes mean opposite things in the two modes, so switching
+        // has to re-check them and re-label what they mean. Leaving them as they
+        // were would have shown a list of "shown to" people under a mode that no
+        // longer reads that way.
+        item.mode = mode.value;
+        syncVisibilityBoxes(item.mode);
+        visibilityLabel.textContent = item.mode === "restricted" ? "Shown to" : "Hidden from";
+        syncVisibilitySummary();
       } catch (error) {
         mode.value = item.mode;
         state.textContent = error.message;
@@ -2077,6 +2365,26 @@ function renderAchievements(achievements, allUsers, allGroups) {
 
     const userHidden = new Map(item.userVisibility.map(entry => [entry.id, entry.visible]));
     const groupHidden = new Map(item.groupVisibility.map(entry => [entry.id, entry.visible]));
+
+    const userBoxes = [];
+    const groupBoxes = [];
+
+    // A checkbox means "can see this one", which means opposite things depending
+    // on the mode: in `restricted` it is the list of who has been given it, in
+    // `everyone` it is the exceptions. Both readings live here so switching mode
+    // re-labels and re-checks the same controls rather than leaving them lying.
+    function syncVisibilityBoxes(mode) {
+      for (const [box, id] of userBoxes) {
+        box.checked = mode === "restricted"
+          ? Boolean(userHidden.get(id))
+          : !userHidden.has(id) || userHidden.get(id) === true;
+      }
+      for (const [box, id] of groupBoxes) {
+        box.checked = mode === "restricted"
+          ? Boolean(groupHidden.get(id))
+          : !groupHidden.has(id) || groupHidden.get(id) === true;
+      }
+    }
 
     async function toggle(kind, subjectId, visible) {
       state.textContent = "Saving...";
@@ -2107,9 +2415,11 @@ function renderAchievements(achievements, allUsers, allGroups) {
       box.checked = item.mode === "restricted"
         ? Boolean(userHidden.get(user.id))
         : !userHidden.has(user.id) || userHidden.get(user.id) === true;
+      userBoxes.push([box, user.id]);
 
       box.addEventListener("change", () => {
         userHidden.set(user.id, box.checked);
+        syncVisibilitySummary();
         toggle("users", user.id, box.checked);
       });
 
@@ -2128,9 +2438,11 @@ function renderAchievements(achievements, allUsers, allGroups) {
       box.checked = item.mode === "restricted"
         ? Boolean(groupHidden.get(group.id))
         : !groupHidden.has(group.id) || groupHidden.get(group.id) === true;
+      groupBoxes.push([box, group.id]);
 
       box.addEventListener("change", () => {
         groupHidden.set(group.id, box.checked);
+        syncVisibilitySummary();
         toggle("groups", group.id, box.checked);
       });
 
@@ -2197,12 +2509,48 @@ function renderAchievements(achievements, allUsers, allGroups) {
       }
     });
 
+    const visibilityLabel = document.createElement("div");
+    visibilityLabel.className = "achievement-fold-label";
+    visibilityLabel.textContent = item.mode === "restricted" ? "Shown to" : "Hidden from";
+
+    // Closed by default. The state that matters is on the summary line; the
+    // controls behind it are for when somebody actually needs to change one.
+    // An administrator who opens one has it remembered, so it does not have to
+    // be reopened on every refresh.
+    const detailsOpen = !achievementFoldCollapsed(item.id);
+    const rememberOpen = open => rememberAchievementFold(item.id, !open);
+
+    const visibilityFold = achievementFold(
+      visibilitySummaryText(item.mode, userHidden, groupHidden),
+      visibility,
+      rememberOpen
+    );
+    visibilityFold.body.prepend(visibilityLabel);
+
+    const winnersFold = achievementFold(
+      item.winners.length
+        ? `${item.winners.length} ${item.winners.length === 1 ? "person has" : "people have"} earned this`
+        : "Nobody has earned this yet",
+      winners,
+      rememberOpen
+    );
+
+    function syncVisibilitySummary() {
+      visibilityFold.summary.textContent = visibilitySummaryText(item.mode, userHidden, groupHidden);
+    }
+
+    visibilityFold.sync(detailsOpen);
+    winnersFold.sync(detailsOpen);
+
+    const pictureBlock = document.createElement("div");
+    pictureBlock.className = "achievement-picture-block";
+    pictureBlock.append(labelled("Picture", pictureInput), removePicture);
+
     card.append(
       labelled("Who can see it", mode),
-      labelled(item.mode === "restricted" ? "Shown to" : "Hidden from", visibility),
-      labelled("Picture", pictureInput),
-      removePicture,
-      winners,
+      visibilityFold.wrap,
+      pictureBlock,
+      winnersFold.wrap,
       state,
       remove
     );
