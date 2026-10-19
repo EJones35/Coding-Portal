@@ -45,14 +45,11 @@
         <a class="nav-item" href="#sessions" data-route="sessions">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>
           Sessions
+          <span class="nav-count" id="sessions-nav-count" hidden></span>
         </a>
         <a class="nav-item" id="profile-nav" href="#profile" data-route="profile" hidden>
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M4.8 19.5c1.3-3.6 4-5.4 7.2-5.4s5.9 1.8 7.2 5.4"/></svg>
           My profile
-        </a>
-        <a class="nav-item disabled" href="#achievements" data-route="achievements" aria-disabled="true">
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l7 8-7 8-7-8z"/><path d="M12 8.5l3.2 3.5-3.2 3.5-3.2-3.5z"/></svg>
-          Achievements <small>SOON</small>
         </a>
       </nav>
 
@@ -106,9 +103,18 @@
             <h1 id="page-title">Overview</h1>
           </div>
           <div class="topbar-actions">
-            <div class="environment"><span class="status-dot" aria-hidden="true"></span> DEVELOPMENT BUILD</div>
+            <div class="environment" id="build-status"><span class="status-dot" aria-hidden="true"></span><span>CONNECTING</span></div>
           </div>
         </header>
+
+        <section class="next-session-card" id="next-session-card" hidden aria-labelledby="next-session-title">
+          <div class="next-session-copy">
+            <div class="eyebrow accent">NEXT UP</div>
+            <h3 id="next-session-title">-</h3>
+            <p class="next-session-meta" id="next-session-meta"></p>
+          </div>
+          <a class="secondary-button" href="#sessions" id="next-session-link">All sessions</a>
+        </section>
 
         <section class="welcome-panel" aria-labelledby="welcome-title">
           <div class="welcome-copy">
@@ -143,12 +149,12 @@
             <p>Find sessions made available to your account.</p>
             <span class="module-state module-state-ready"><span class="state-indicator" aria-hidden="true"></span> AVAILABLE</span>
           </a>
-          <div class="module-card" aria-disabled="true">
+          <a class="module-card module-link" href="#profile" data-module-route="profile">
             <div class="module-icon amber"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l7 8-7 8-7-8z"/><path d="M12 8.5l3.2 3.5-3.2 3.5-3.2-3.5z"/></svg></div>
             <div class="module-title">Achievements</div>
-            <p>Badges are not part of this build yet. Sessions and attendance are live now.</p>
-            <span class="module-state"><span class="state-indicator" aria-hidden="true"></span> IN DEVELOPMENT</span>
-          </div>
+            <p>Every badge you have earned, on your profile.</p>
+            <span class="module-state module-state-ready"><span class="state-indicator" aria-hidden="true"></span> AVAILABLE</span>
+          </a>
         </section>
       </section>
 
@@ -203,9 +209,14 @@
             <h2 id="sessions-title">Coding sessions</h2>
             <p>Upcoming sessions, past activity and your attendance.</p>
           </div>
-          <button class="secondary-button" id="sessions-refresh" type="button">Refresh</button>
+          <div class="sessions-heading-actions">
+            <label class="session-search-label" for="session-search">Find a session</label>
+            <input id="session-search" type="search" maxlength="100" placeholder="Title, description or location" autocomplete="off">
+            <button class="secondary-button" id="sessions-refresh" type="button">Refresh</button>
+          </div>
         </div>
         <p id="sessions-message" class="panel-message" role="status" aria-live="polite">Loading sessions...</p>
+        <p id="session-search-empty" class="empty-state" hidden>No session matches that. Clear the box to see them all again.</p>
 
         <section class="session-edit-panel" id="session-edit-panel" hidden aria-labelledby="session-edit-title">
           <div class="session-edit-heading">

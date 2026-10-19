@@ -2577,3 +2577,466 @@ test("the achievement detail lists fold closed by default", () => {
   assert.match(app, /visibilityFold\.sync\(detailsOpen\);\s*\n\s*winnersFold\.sync\(detailsOpen\);/);
   assert.match(app, /function rememberAchievementFold\(id, collapsed\)/);
 });
+
+// ---------------------------------------------------------------------------
+// Everyday quality of life: search, relative time, next session
+//
+// The three helpers are pure, so they are lifted out of the source and executed
+// exactly as splitSessions is. The point is that a relativeTime which lost its
+// "ago", or a filter that widened instead of narrowing when a word was added,
+// fails here rather than shipping.
+// ---------------------------------------------------------------------------
+
+test("relative time reads forward and backward, and says now when it means it", () => {
+  const relativeTime = loadAppFunction("relativeTime");
+  const clock = Date.parse("2026-11-20T18:00:00Z");
+
+  assert.equal(relativeTime("2026-11-20T18:00:00Z", clock), "Happening now");
+  assert.equal(relativeTime("2026-11-20T18:00:40Z", clock), "Happening now", "40 seconds out is now, not in 0 minutes");
+  assert.equal(relativeTime("2026-11-20T17:59:30Z", clock), "Happening now", "and the same going backwards");
+
+  assert.equal(relativeTime("2026-11-20T18:45:00Z", clock), "in 45 minutes");
+  assert.equal(relativeTime("2026-11-20T19:00:00Z", clock), "in 1 hour", "one hour is singular");
+  assert.equal(relativeTime("2026-11-20T20:00:00Z", clock), "in 2 hours");
+  assert.equal(relativeTime("2026-11-23T18:00:00Z", clock), "in 3 days");
+  assert.equal(relativeTime("2026-12-18T18:00:00Z", clock), "in 4 weeks", "past a month it reads in weeks");
+
+  assert.equal(relativeTime("2026-11-20T17:00:00Z", clock), "1 hour ago");
+  assert.equal(relativeTime("2026-11-17T18:00:00Z", clock), "3 days ago");
+});
+
+test("relative time says nothing rather than something wrong", () => {
+  const relativeTime = loadAppFunction("relativeTime");
+  const clock = Date.parse("2026-11-20T18:00:00Z");
+
+  assert.equal(relativeTime("", clock), "", "no date is not a relative time of anything");
+  assert.equal(relativeTime(null, clock), "");
+  assert.equal(relativeTime("not a date", clock), "");
+});
+
+test("search narrows as words are added instead of emptying the list", () => {
+  const matchesSessionQuery = loadAppFunction("matchesSessionQuery");
+  const item = {
+    title: "Wednesday Python session",
+    description: "Refactoring the attendance portal",
+    location: "Room 4"
+  };
+
+  assert.equal(matchesSessionQuery(item, ""), true, "an empty box matches everything");
+  assert.equal(matchesSessionQuery(item, "   "), true, "and so does whitespace only");
+  assert.equal(matchesSessionQuery(item, "python"), true);
+  assert.equal(matchesSessionQuery(item, "PYTHON"), true, "case is not a filter");
+  assert.equal(matchesSessionQuery(item, "room 4"), true, "location is searched");
+  assert.equal(matchesSessionQuery(item, "portal"), true, "description is searched");
+  assert.equal(matchesSessionQuery(item, "wednesday python"), true, "words may come from different fields");
+  assert.equal(matchesSessionQuery(item, "wednesday js"), false, "both words must be present");
+  assert.equal(matchesSessionQuery(item, "nothing here"), false);
+
+  // Narrowing must be monotonic: adding a word can never bring a card back.
+  // The added word has to be one that is genuinely absent - "room" is not,
+  // because the location is "Room 4", and an earlier draft of this line asserted
+  // false for a query the function was right to match.
+  assert.equal(matchesSessionQuery(item, "wednesday"), true);
+  assert.equal(matchesSessionQuery(item, "wednesday python"), true);
+  assert.equal(matchesSessionQuery(item, "wednesday python room"), true, "three real words, three matches");
+  assert.equal(matchesSessionQuery(item, "wednesday python nowhere"), false, "one absent word is enough");
+  assert.equal(matchesSessionQuery(item, "wednesday python nowhere either"), false);
+});
+
+test("search does not crash on a session with nothing filled in", () => {
+  const matchesSessionQuery = loadAppFunction("matchesSessionQuery");
+
+  assert.equal(matchesSessionQuery({ title: "Untitled" }, "room"), false);
+  assert.equal(matchesSessionQuery({ title: "Untitled" }, "untitled"), true);
+  assert.equal(matchesSessionQuery({}, "anything"), false);
+});
+
+test("the overview names the soonest scheduled session and nothing else", () => {
+  const nextSession = loadAppFunction("nextSession");
+  const clock = Date.parse("2026-11-20T18:00:00Z");
+  const at = iso => Date.parse(iso);
+
+  const sessions = [
+    { id: "far", status: "scheduled", startsAt: "2026-12-01T18:00:00Z" },
+    { id: "soon", status: "scheduled", startsAt: "2026-11-21T18:00:00Z" },
+    { id: "sooner", status: "scheduled", startsAt: "2026-11-20T20:00:00Z" },
+    { id: "done", status: "completed", startsAt: "2026-11-19T18:00:00Z" },
+    { id: "off", status: "cancelled", startsAt: "2026-11-20T19:00:00Z" }
+  ];
+
+  const next = nextSession(sessions, clock);
+  assert.equal(next.id, "sooner", "soonest scheduled wins, regardless of list order");
+  assert.equal(at(next.startsAt) > clock, true);
+
+  // A session already under way is still the next one. Skipping it would make
+  // the overview wrong at exactly the moment somebody reads it.
+  const running = nextSession([
+    { id: "running", status: "scheduled", startsAt: "2026-11-20T17:30:00Z" },
+    { id: "later", status: "scheduled", startsAt: "2026-11-20T21:00:00Z" }
+  ], clock);
+  assert.equal(running.id, "running", "a session that started 30 minutes ago is still next");
+
+  assert.equal(nextSession([], clock), null);
+  assert.equal(nextSession([{ id: "a", status: "completed", startsAt: "2026-11-20T19:00:00Z" }], clock), null,
+    "nothing scheduled means nothing to show");
+});
+
+test("the overview skips a stale session that never got completed", () => {
+  const nextSession = loadAppFunction("nextSession");
+  const clock = Date.parse("2026-11-20T18:00:00Z");
+
+  const stale = nextSession([
+    { id: "stale", status: "scheduled", startsAt: "2026-11-19T14:00:00Z" },
+    { id: "real", status: "scheduled", startsAt: "2026-11-22T18:00:00Z" }
+  ], clock);
+
+  assert.equal(stale.id, "real", "scheduled but four days overdue is not what is next");
+});
+
+test("the overview survives sessions with no usable date", () => {
+  const nextSession = loadAppFunction("nextSession");
+  const clock = Date.parse("2026-11-20T18:00:00Z");
+
+  const next = nextSession([
+    { id: "broken", status: "scheduled", startsAt: null },
+    { id: "good", status: "scheduled", startsAt: "2026-11-21T18:00:00Z" }
+  ], clock);
+
+  assert.equal(next.id, "good", "one unreadable date cannot take the whole card down");
+  assert.equal(nextSession([{ id: "broken", status: "scheduled", startsAt: "nonsense" }], clock), null);
+});
+
+// ---------------------------------------------------------------------------
+// The same features, as the shipped interface actually presents them
+// ---------------------------------------------------------------------------
+
+test("the sessions page has a search box wired to a filter that hides cards in place", () => {
+  const app = appSource();
+  const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+
+  assert.match(html, /id="session-search"/, "the search box has to exist to be searched in");
+  assert.match(html, /id="session-search-empty"/);
+
+  const filter = app.match(/function applySessionFilter\(\) \{[\s\S]*?\n\}/);
+  assert.ok(filter, "applySessionFilter must exist");
+  assert.equal(filter[0].includes("loadSessions("), false,
+    "filtering must not reload the list - that is what collapses the attendance panel");
+  assert.match(filter[0], /card\.hidden = !match/);
+
+  // Searching is not wired to anything else if the input event is missing.
+  assert.match(app, /sessionSearch\.addEventListener\("input"/);
+});
+
+test("the slash key focuses the session search, but never while typing elsewhere", () => {
+  const app = appSource();
+  const handler = app.match(/document\.addEventListener\("keydown"[\s\S]*?sessionSearch\.select\(\);\n\}\);/);
+
+  assert.ok(handler, "a / shortcut handler must exist");
+  assert.match(handler[0], /event\.key !== "\/"/);
+  assert.match(handler[0], /INPUT", "TEXTAREA", "SELECT"\]/,
+    "typing a slash into a field must not steal it");
+  assert.match(handler[0], /event\.preventDefault\(\)/);
+});
+
+test("Escape backs out of panels, not only the delete dialog", () => {
+  const app = appSource();
+  const handler = app.match(/if \(event\.key !== "Escape"\) return;[\s\S]*?\n\}\);/);
+
+  assert.ok(handler, "the Escape handler must exist");
+  assert.match(handler[0], /closeDeleteModal\(\)/);
+  assert.match(handler[0], /closeAttendancePanel\(\)/, "the attendance panel used to need its own close button found");
+  assert.match(handler[0], /closeEditPanel\(\)/, "and so did an accidental edit form");
+  assert.match(app, /access\.dataset\.accessToggle = ""/, "access panels need a handle for Escape to find");
+});
+
+test("the interface no longer claims to be a development build, or that achievements are unfinished", () => {
+  const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  const app = appSource();
+
+  // These were true once and stopped being true. The badge sat above the fold on
+  // a live site, and the module card told members their badges did not exist.
+  assert.equal(html.includes("DEVELOPMENT BUILD"), false, "production is not a development build");
+  assert.equal(html.includes("Badges are not part of this build yet"), false, "achievements are live");
+  assert.match(html, /id="build-status"/);
+
+  // The badge now reports the health check rather than a hardcoded string.
+  assert.match(app, /function renderBuildStatus\(text, isError\)/);
+  assert.match(app, /renderBuildStatus\("PORTAL ONLINE", false\)/);
+  assert.match(app, /renderBuildStatus\("SERVICES UNAVAILABLE", true\)/);
+
+  // The sidebar promised a module that is never coming; it is now a working link.
+  assert.equal(/nav-item disabled[^>]*data-route="achievements"/.test(html), false);
+  assert.equal(html.includes("Achievements <small>SOON</small>"), false);
+});
+
+test("the overview loads sessions so it can actually say what is next", () => {
+  const app = appSource();
+  const load = app.match(/async function loadSessions\(\) \{[\s\S]*?\n\}/);
+
+  assert.ok(load);
+  // Visibility belongs to the router. The loader used to un-hide the sessions
+  // panel, which is why the overview could not reuse it.
+  assert.equal(load[0].includes("sessionsPanel.hidden = false"), false,
+    "the loader must not un-hide a panel the router is currently hiding");
+  assert.match(app, /if \(route === "sessions" \|\| route === "home"\) loadSessions\(\);/);
+  assert.match(app, /function renderNextSession\(\)/);
+  assert.match(app, /renderNextSession\(\);\n\}/, "the next-session card is filled after every load");
+});
+
+test("an edit that changes a title re-filters and re-picks the next session", () => {
+  const app = appSource();
+  const update = app.match(/function applySessionUpdate\(session\) \{[\s\S]*?\n\}/);
+
+  assert.ok(update);
+  assert.match(update[0], /applySessionFilter\(\)/,
+    "renaming a session out of the filter must take it out of the list");
+  assert.match(update[0], /renderNextSession\(\)/,
+    "completing the next session must promote the one after it");
+});
+
+// ---------------------------------------------------------------------------
+// The profile achievements list
+//
+// This is the reported fault. loadMyAchievements used to ask to insert the
+// "2 of 3 earned" line before a grid element it had created three lines
+// earlier but had not attached yet. The DOM refuses that, and the live portal
+// answered with:
+//
+//   Failed to execute 'insertBefore' on 'Node': The node before which the new
+//   node is to be inserted is not a child of this node.
+//
+// Nothing else in this suite could see it. The API tests never touch the DOM,
+// and the headless-Chrome load harness only catches a throw *on load* - this
+// one fires after the profile fetch resolves.
+//
+// So the function is lifted out of public/app.js and actually run against a
+// small DOM that implements insertBefore the way a browser does: a reference
+// node that is not already a child throws. Run it against the old code and it
+// throws the exact message above; run it against the fix and it renders.
+// ---------------------------------------------------------------------------
+
+/** The browser's rule, kept honest: a detached reference node is refused. */
+const INSERT_BEFORE_FAULT = /The node before which the new node is to be inserted is not a child of this node/;
+
+function makeDom() {
+  class Element {
+    constructor(tagName) {
+      this.tagName = tagName;
+      this.children = [];
+      this.parentNode = null;
+      this.hidden = false;
+      this._className = "";
+      this._text = "";
+    }
+
+    get className() { return this._className; }
+    set className(value) { this._className = value; }
+
+    get classList() {
+      const owner = this;
+      const parts = () => owner._className.split(/\s+/).filter(Boolean);
+      return {
+        add(...names) {
+          owner._className = [...new Set([...parts(), ...names])].join(" ");
+        },
+        remove(...names) {
+          owner._className = parts().filter(name => !names.includes(name)).join(" ");
+        },
+        contains(name) { return parts().includes(name); }
+      };
+    }
+
+    get textContent() {
+      return this.children.length
+        ? this.children.map(child => child.textContent).join("")
+        : this._text;
+    }
+
+    set textContent(value) {
+      for (const child of [...this.children]) this.removeChild(child);
+      this._text = String(value);
+    }
+
+    setAttribute() {}
+    addEventListener() {}
+
+    append(...nodes) {
+      for (const node of nodes) this.insertBefore(node, null);
+    }
+
+    appendChild(node) {
+      this.append(node);
+      return node;
+    }
+
+    insertBefore(node, reference) {
+      // The whole point of the shim: this is where the browser refuses.
+      if (reference != null && reference.parentNode !== this) {
+        const error = new Error(
+          "Failed to execute 'insertBefore' on 'Node': The node before which the new node is to be inserted is not a child of this node."
+        );
+        error.name = "NotFoundError";
+        throw error;
+      }
+
+      if (node.parentNode) node.parentNode.removeChild(node);
+      node.parentNode = this;
+
+      if (reference == null) {
+        this.children.push(node);
+      } else {
+        this.children.splice(this.children.indexOf(reference), 0, node);
+      }
+      return node;
+    }
+
+    removeChild(node) {
+      const index = this.children.indexOf(node);
+      if (index >= 0) this.children.splice(index, 1);
+      node.parentNode = null;
+      return node;
+    }
+
+    // Real replaceChildren drops direct text too, because the text is itself a
+    // child node. The portal relies on that: it clears "Loading..." this way.
+    replaceChildren(...nodes) {
+      for (const child of [...this.children]) this.removeChild(child);
+      this._text = "";
+      this.append(...nodes);
+    }
+  }
+
+  return { Element, document: { createElement: tagName => new Element(tagName) } };
+}
+
+/** Lift loadMyAchievements out of the app and hand back a callable version. */
+function loadMyAchievementsAgainst(dom, { target, apiFetch }) {
+  const body = appSource().match(/async function loadMyAchievements\(\) \{[\s\S]*?\n\}/);
+  assert.ok(body, "loadMyAchievements must exist in public/app.js");
+
+  const deps = {
+    el: () => target,
+    apiFetch,
+    document: dom.document,
+    achievementImage: () => new dom.Element("div"),
+    initialFor: () => "?"
+  };
+
+  const names = Object.keys(deps);
+
+  return new Function(...names, `${body[0]}; return loadMyAchievements;`)(
+    ...names.map(name => deps[name])
+  );
+}
+
+function badges(count) {
+  return Array.from({ length: count }, (_, index) => ({
+    name: `Badge ${index + 1}`,
+    description: index === 0 ? "The first one." : "",
+    earned: index % 2 === 0
+  }));
+}
+
+test("the shim refuses a detached reference node, or it is not testing anything", () => {
+  const dom = makeDom();
+  const parent = new dom.Element("div");
+  const detached = new dom.Element("span");
+
+  assert.throws(
+    () => parent.insertBefore(new dom.Element("b"), detached),
+    INSERT_BEFORE_FAULT,
+    "insertBefore must throw the browser's own message for an unattached reference"
+  );
+
+  // And the ordinary case still works, so the tests below mean something.
+  parent.append(detached);
+  assert.doesNotThrow(() => parent.insertBefore(new dom.Element("b"), detached));
+  assert.deepEqual(parent.children.map(child => child.tagName), ["b", "span"]);
+});
+
+test("the profile achievements list renders the earned count above the badges", async () => {
+  const dom = makeDom();
+  const target = new dom.Element("section");
+
+  await loadMyAchievementsAgainst(dom, {
+    target,
+    apiFetch: async () => ({ achievements: badges(3) })
+  })();
+
+  // loadMyAchievements catches its own errors and paints the message, so a
+  // throw here used to reach the profile as text rather than as a stack trace.
+  // Assert the browser's own wording is absent, or the reason is on record.
+  assert.doesNotMatch(target.textContent, INSERT_BEFORE_FAULT,
+    "loadMyAchievements swallowed a DOM error, so the profile showed the raw browser message instead of the badges");
+
+  assert.equal(target.children.length, 2, "a progress line and a grid, nothing else");
+
+  const [progress, grid] = target.children;
+
+  assert.equal(progress.tagName, "p", "the progress line comes first");
+  assert.equal(progress.className, "achievement-progress");
+  assert.equal(progress.textContent, "2 of 3 earned");
+
+  assert.equal(grid.className, "achievement-grid");
+  assert.equal(grid.children.length, 3, "every badge still renders");
+
+  // The grid must be attached to the target, not merely built.
+  assert.equal(grid.parentNode, target);
+});
+
+test("a single badge gets no progress line, and still renders", async () => {
+  const dom = makeDom();
+  const target = new dom.Element("section");
+
+  await loadMyAchievementsAgainst(dom, {
+    target,
+    apiFetch: async () => ({ achievements: badges(1) })
+  })();
+
+  assert.equal(target.children.length, 1, "one badge needs no '1 of 1 earned' line");
+  assert.equal(target.children[0].className, "achievement-grid");
+  assert.equal(target.children[0].children.length, 1);
+});
+
+test("no badges yet shows the empty state rather than an empty grid", async () => {
+  const dom = makeDom();
+  const target = new dom.Element("section");
+
+  await loadMyAchievementsAgainst(dom, {
+    target,
+    apiFetch: async () => ({ achievements: [] })
+  })();
+
+  assert.equal(target.children.length, 1);
+  assert.equal(target.children[0].tagName, "p");
+  assert.equal(target.children[0].className, "empty-state");
+});
+
+test("a failed achievements fetch says so instead of throwing", async () => {
+  const dom = makeDom();
+  const target = new dom.Element("section");
+
+  await loadMyAchievementsAgainst(dom, {
+    target,
+    apiFetch: async () => { throw new Error("Achievements are unavailable."); }
+  })();
+
+  assert.equal(target.children.length, 0);
+  assert.equal(target.textContent, "Achievements are unavailable.");
+});
+
+test("the whole shipped frontend never inserts before a node it has not attached", () => {
+  const app = appSource();
+
+  // Every remaining insertBefore is checked by eye against its reference node;
+  // the list is kept here so a new one cannot slip in unreviewed.
+  const uses = [...app.matchAll(/^.*\.insertBefore\(([^)]*)\).*$/gm)].map(match => match[0].trim());
+
+  for (const use of uses) {
+    assert.ok(!/insertBefore\(\s*\w+\s*,/.test(use) || !use.includes(", grid"),
+      `insertBefore with a reference that may still be detached: ${use}`);
+  }
+
+  assert.deepEqual(uses, [],
+    `app.js should build nodes with append, not insertBefore. Found: ${uses.join(" | ")}`);
+});

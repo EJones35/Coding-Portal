@@ -67,6 +67,13 @@ const editStartsInput = el("#edit-starts");
 const editEndsInput = el("#edit-ends");
 const editLocationInput = el("#edit-location");
 const editStatusInput = el("#edit-status");
+const sessionSearch = el("#session-search");
+const sessionSearchEmpty = el("#session-search-empty");
+const sessionsNavCount = el("#sessions-nav-count");
+const buildStatus = el("#build-status");
+const nextSessionCard = el("#next-session-card");
+const nextSessionTitle = el("#next-session-title");
+const nextSessionMeta = el("#next-session-meta");
 
 // Live "N present" text on each card, kept in step with attendance changes.
 const attendanceCountNodes = new Map();
@@ -87,6 +94,7 @@ let removeArmed = false;
 let removeArmTimer = null;
 let settingsBusy = false;
 let searchTimer = null;
+let sessionSearchTimer = null;
 let groupsCache = [];
 
 // ---------------------------------------------------------------------------
@@ -519,8 +527,10 @@ async function checkApiStatus() {
     const result = await apiFetch("/api/health", {}, "Health check");
     if (result.status !== "ok") throw new Error("unhealthy");
     statusElement.textContent = "Portal services connected";
+    renderBuildStatus("PORTAL ONLINE", false);
   } catch {
     statusElement.textContent = "Portal services unavailable";
+    renderBuildStatus("SERVICES UNAVAILABLE", true);
   }
 }
 
@@ -782,8 +792,28 @@ deleteModal.addEventListener("mousedown", event => {
   if (event.target === deleteModal) closeDeleteModal();
 });
 
+// Escape backs out of whatever is open, innermost first. It used to answer only
+// the delete dialog, so every other panel had to be closed by hunting for its own
+// close button - and the one that mattered, an accidental edit form, was the
+// hardest to find.
 document.addEventListener("keydown", event => {
-  if (event.key === "Escape" && !deleteModal.hidden) closeDeleteModal();
+  if (event.key !== "Escape") return;
+  if (!deleteModal.hidden) {
+    closeDeleteModal();
+    return;
+  }
+  for (const toggle of document.querySelectorAll('[data-access-toggle][aria-expanded="true"]')) {
+    toggle.click();
+    return;
+  }
+  if (!sessionAttendancePanel.hidden) {
+    closeAttendancePanel();
+    return;
+  }
+  if (!sessionEditPanel.hidden) {
+    closeEditPanel();
+    return;
+  }
 });
 
 deleteConfirmation.addEventListener("input", () => {
@@ -912,7 +942,12 @@ function updatePageView() {
       loadGroups();
       loadAchievements();
     }
-    if (route === "sessions") loadSessions();
+    // The overview shows what is next, so it needs the sessions. It runs the
+    // same loader rather than a second, summary-only fetch: two code paths
+    // reading the same endpoint is how the overview and the list start to
+    // disagree about what is scheduled. Panel visibility is the routing's job,
+    // which is why the loader no longer un-hides anything itself.
+    if (route === "sessions" || route === "home") loadSessions();
     if (route === "profile") {
       loadProfile();
       loadMyAchievements();
@@ -960,6 +995,70 @@ const SESSION_STATUS_LABELS = {
 
 function sessionStatusLabel(value) {
   return SESSION_STATUS_LABELS[value] || value || "Scheduled";
+}
+
+// "Thu 20 Nov, 18:00" answers *when*. It does not answer *how soon*, which is the
+// question somebody actually opens a sessions page with. This is the second
+// reading, shown next to the first rather than replacing it.
+function relativeTime(value, now) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "";
+
+  const reference = Number(now);
+  let seconds = Math.round((date.getTime() - (Number.isFinite(reference) ? reference : Date.now())) / 1000);
+  const past = seconds < 0;
+  seconds = Math.abs(seconds);
+
+  // Within a minute either way is "now", not "in 0 seconds".
+  if (seconds < 60) return "Happening now";
+
+  let label = "minute";
+  let size = 60;
+  for (const [unit, unitSeconds] of [["minute", 60], ["hour", 3600], ["day", 86400], ["week", 604800]]) {
+    if (seconds < unitSeconds) break;
+    label = unit;
+    size = unitSeconds;
+  }
+
+  const amount = Math.max(1, Math.round(seconds / size));
+  const text = `${amount} ${label}${amount === 1 ? "" : "s"}`;
+  return past ? `${text} ago` : `in ${text}`;
+}
+
+// Every word must appear somewhere on the card, so adding a word narrows the
+// list instead of emptying it. An empty box matches everything, which is what
+// makes clearing it feel like clearing rather than undoing.
+function matchesSessionQuery(item, query) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) return true;
+  const haystack = [item && item.title, item && item.description, item && item.location]
+    .map(value => String(value || "").toLowerCase())
+    .join("\n");
+  return needle.split(/\s+/).every(word => haystack.includes(word));
+}
+
+// The one session to put on the overview. Anything scheduled, soonest first, and
+// a session already under way still counts as next - a list that skips the thing
+// happening right now is wrong at exactly the moment it is read.
+function nextSession(sessions, now) {
+  const reference = Number(now);
+  const clock = Number.isFinite(reference) ? reference : Date.now();
+  let best = null;
+  let bestTime = Infinity;
+
+  for (const item of sessions || []) {
+    if (!item || item.status !== "scheduled") continue;
+    const time = new Date(item.startsAt).getTime();
+    if (!Number.isFinite(time)) continue;
+    // Started over an hour ago and still marked scheduled: stale, not next.
+    if (time < clock - 3600000) continue;
+    if (time < bestTime) {
+      bestTime = time;
+      best = item;
+    }
+  }
+
+  return best;
 }
 
 // Completing a session is not deleting it. It is the difference between "still
@@ -1100,8 +1199,64 @@ function moveSessionCard(card, status) {
   routeSessionCard(card, status);
 }
 
+// Filtering hides cards in place. It never rebuilds the list: a rebuild is what
+// collapses the attendance panel out from under whoever is working in it, and a
+// search box that did that would make the panel unusable.
+function applySessionFilter() {
+  const query = sessionSearch ? sessionSearch.value : "";
+  const cards = sessionsList.querySelectorAll(".session-card");
+  let shown = 0;
+
+  for (const card of cards) {
+    const item = sessionsCache.find(entry => entry.id === card.dataset.sessionId);
+    const match = !item || matchesSessionQuery(item, query);
+    card.hidden = !match;
+    if (match) shown += 1;
+  }
+
+  if (sessionSearchEmpty) sessionSearchEmpty.hidden = shown > 0 || !query.trim();
+  updateSessionsNavCount();
+}
+
+// The sidebar answers "how much is waiting for me" without opening the page.
+function updateSessionsNavCount() {
+  if (!sessionsNavCount) return;
+  const upcoming = sessionsCache.filter(item => item && item.status === "scheduled").length;
+  sessionsNavCount.textContent = upcoming ? String(upcoming) : "";
+  sessionsNavCount.hidden = upcoming === 0;
+}
+
+// The overview used to be a welcome panel and three links. It now answers the
+// first question a member has, which is what is next and when.
+function renderNextSession() {
+  if (!nextSessionCard) return;
+  const item = nextSession(sessionsCache);
+
+  if (!item) {
+    nextSessionCard.hidden = true;
+    return;
+  }
+
+  nextSessionCard.hidden = false;
+  nextSessionTitle.textContent = item.title || "Untitled session";
+  const when = sessionDate(item.startsAt);
+  const relative = relativeTime(item.startsAt);
+  const where = String(item.location || "").trim();
+  nextSessionMeta.textContent = [when, relative, where].filter(Boolean).join(" | ");
+}
+
+// The build badge used to say DEVELOPMENT BUILD in production, which was a lie
+// on the most prominent line of the page. It now reports what it can actually
+// see: the health endpoint's answer.
+function renderBuildStatus(text, isError) {
+  if (!buildStatus) return;
+  const label = buildStatus.querySelector("span:last-child");
+  if (!label) return;
+  label.textContent = text;
+  buildStatus.classList.toggle("status-error", Boolean(isError));
+}
+
 async function loadSessions() {
-  sessionsPanel.hidden = false;
   sessionsMessage("Loading sessions...");
   sessionsList.replaceChildren();
   attendanceCountNodes.clear();
@@ -1126,6 +1281,8 @@ async function loadSessions() {
 
     if (!sessionsCache.length) {
       sessionsMessage("No sessions have been scheduled yet.");
+      updateSessionsNavCount();
+      renderNextSession();
       return;
     }
 
@@ -1266,6 +1423,7 @@ async function loadSessions() {
 
         const access = createActionButton("Who can see this");
         access.className = "secondary-button access-toggle";
+        access.dataset.accessToggle = "";
         access.setAttribute("aria-expanded", "false");
         access.setAttribute("aria-controls", "access-" + item.id);
         access.addEventListener("click", () => toggleAccessPanel(item, card, access));
@@ -1284,10 +1442,18 @@ async function loadSessions() {
 
       routeSessionCard(card, item.status);
     }
+
+    // Counted and summarised only after every card exists, so the badge and the
+    // filter cannot disagree with what is on screen.
+    updateSessionsNavCount();
+    applySessionFilter();
+    renderNextSession();
   } catch (error) {
     sessionsList.replaceChildren();
     attendanceCountNodes.clear();
     sessionsMessage(error.message || "Unable to load sessions.", true);
+    updateSessionsNavCount();
+    renderNextSession();
   }
 }
 
@@ -1304,7 +1470,7 @@ function sessionFacts(item) {
   facts.className = "session-facts";
 
   for (const [label, value] of [
-    ["Starts", sessionDate(item.startsAt)],
+    ["Starts", [sessionDate(item.startsAt), relativeTime(item.startsAt)].filter(Boolean).join("  -  ")],
     ["Ends", item.endsAt ? sessionDate(item.endsAt) : ""],
     ["Location", (item.location || "").trim()]
   ]) {
@@ -1487,6 +1653,13 @@ function applySessionUpdate(session) {
 
   const select = card.querySelector("[data-session-status-select]");
   if (select) select.value = session.status;
+
+  // An edit can change the title, the description or the status, any of which
+  // changes what the filter matches and what counts as next. Recomputed here so
+  // the sidebar, the overview card and the filtered list cannot disagree with a
+  // card that was just edited in place.
+  applySessionFilter();
+  renderNextSession();
 }
 
 for (const control of [editTitleInput, editDescriptionInput, editStartsInput, editEndsInput, editLocationInput]) {
@@ -1721,6 +1894,39 @@ el("#sessions-refresh").addEventListener("click", () => {
   loadSessions();
 });
 el("#session-attendance-close").addEventListener("click", closeAttendancePanel);
+
+// Typing narrows the list as you go, the same way the account search does. The
+// filter only hides cards, so the count, the two buckets and anything open
+// underneath all survive being typed into.
+if (sessionSearch) {
+  sessionSearch.addEventListener("input", () => {
+    clearTimeout(sessionSearchTimer);
+    sessionSearchTimer = setTimeout(applySessionFilter, 200);
+  });
+  sessionSearch.addEventListener("search", () => {
+    clearTimeout(sessionSearchTimer);
+    applySessionFilter();
+  });
+  sessionSearch.addEventListener("keydown", event => {
+    if (event.key === "Escape" && sessionSearch.value) {
+      event.stopPropagation();
+      sessionSearch.value = "";
+      applySessionFilter();
+    }
+  });
+}
+
+// `/` is the search key on most of the web, and it is the fastest way into the
+// one box on this portal that pays for itself. Never while typing somewhere else.
+document.addEventListener("keydown", event => {
+  if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+  const tag = (event.target && event.target.tagName) || "";
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(tag) || (event.target && event.target.isContentEditable)) return;
+  if (currentRoute() !== "sessions" || !sessionSearch) return;
+  event.preventDefault();
+  sessionSearch.focus();
+  sessionSearch.select();
+});
 
 sessionCreateForm.addEventListener("submit", async event => {
   event.preventDefault();
@@ -2099,7 +2305,10 @@ async function loadMyAchievements() {
       const progress = document.createElement("p");
       progress.className = "achievement-progress";
       progress.textContent = `${earned} of ${list.length} earned`;
-      target.insertBefore(progress, grid);
+      // Appended, not inserted before the grid: the grid is still detached at
+      // this point, and insertBefore throws if the reference node is not
+      // already a child. target was emptied above, so this is still first.
+      target.append(progress);
     }
 
     for (const item of list) {
