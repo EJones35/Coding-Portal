@@ -3040,3 +3040,132 @@ test("the whole shipped frontend never inserts before a node it has not attached
   assert.deepEqual(uses, [],
     `app.js should build nodes with append, not insertBefore. Found: ${uses.join(" | ")}`);
 });
+
+// ---------------------------------------------------------------------------
+// 23 Oct 2026: picture previews, and an achievement you can edit after making
+// it. The PATCH route has accepted name, description and icon since the first
+// achievements pass and an API test already covers it - the missing half was
+// entirely the admin form, so these tests are about the front end.
+// ---------------------------------------------------------------------------
+
+/** Lift createPicturePreview out of the app against a small DOM and a URL stub. */
+function previewAgainst() {
+  const body = appSource().match(/function createPicturePreview\(input, options = \{\}\) \{[\s\S]*?\n\}/);
+  assert.ok(body, "createPicturePreview must exist in public/app.js");
+
+  const dom = makeDom();
+  const revoked = [];
+
+  const deps = {
+    document: dom.document,
+    URL: {
+      createObjectURL: file => `blob:${file.name}`,
+      revokeObjectURL: url => revoked.push(url)
+    },
+    formatBytes: bytes => `${bytes} B`
+  };
+
+  const names = Object.keys(deps);
+  const create = new Function(...names, `${body[0]}; return createPicturePreview;`)(
+    ...names.map(name => deps[name])
+  );
+
+  return { create, revoked };
+}
+
+test("a chosen picture is previewed as an image, not just a file name", () => {
+  const { create } = previewAgainst();
+  const preview = create({ value: "chosen.png" });
+
+  assert.equal(preview.tile.hidden, true, "nothing is shown until a file is chosen");
+
+  preview.show({ name: "badge.png", size: 2048 });
+
+  assert.equal(preview.tile.hidden, false);
+  assert.equal(preview.tile.children.length, 1);
+  assert.equal(preview.tile.children[0].tagName, "img");
+  assert.equal(preview.tile.children[0].src, "blob:badge.png",
+    "the preview must point at the chosen file's own object URL");
+  assert.equal(preview.note.textContent, "badge.png (2048 B)");
+  assert.equal(preview.clear.hidden, false, "a deferred upload can be cancelled");
+});
+
+test("a refused file says why, and shows nothing", () => {
+  const { create } = previewAgainst();
+  const preview = create({ value: "" });
+
+  preview.show(null, "Choose an image smaller than 350 KB.");
+
+  assert.equal(preview.tile.hidden, true, "a refused file must not be previewed");
+  assert.equal(preview.note.hidden, false);
+  assert.match(preview.note.textContent, /smaller than 350 KB/);
+  assert.ok(preview.note.classList.contains("error"));
+});
+
+test("the object URL is revoked when the preview is cleared or replaced", () => {
+  const { create, revoked } = previewAgainst();
+  const input = { value: "chosen.png" };
+  const preview = create(input);
+
+  preview.show({ name: "first.png", size: 10 });
+  preview.show({ name: "second.png", size: 10 });
+
+  assert.deepEqual(revoked, ["blob:first.png"],
+    "replacing a preview must release the image it was holding");
+
+  preview.reset();
+
+  assert.deepEqual(revoked, ["blob:first.png", "blob:second.png"]);
+  assert.equal(preview.tile.hidden, true);
+  assert.equal(preview.note.hidden, true);
+});
+
+test("an immediate upload shows no Clear selection button", () => {
+  const { create } = previewAgainst();
+  const preview = create({ value: "" }, { clearable: false });
+
+  preview.show({ name: "badge.png", size: 10 });
+
+  assert.equal(preview.tile.hidden, false);
+  assert.equal(preview.clear.hidden, true,
+    "the per-achievement picture uploads on selection, so there is nothing to clear");
+});
+
+test("every file input outside the profile page is wired to a preview", () => {
+  const app = appSource();
+
+  // The profile picture has its own preview (pendingPicture/renderPendingPreview)
+  // and is deliberately left alone. These three are the ones that used to show
+  // nothing but a file name.
+  assert.match(app, /createPicturePreview\(achievementCreateInput\)/,
+    "the create-achievement picture needs a preview");
+  assert.match(app, /createPicturePreview\(pictureInput, \{ clearable: false \}\)/,
+    "an achievement's own picture needs a preview");
+  assert.match(app, /createPicturePreview\(pictureInput\);/,
+    "a group picture needs a preview");
+
+  const html = readFileSync(fileURLToPath(new URL("../public/index.html", import.meta.url)), "utf8");
+  assert.match(html, /id="achievement-picture-preview"/,
+    "the create form needs somewhere to put the preview");
+});
+
+test("an achievement with no picture shows its stored icon, not the initial", () => {
+  const body = appSource().match(/function achievementImage\(item, className = "achievement-icon"\) \{[\s\S]*?\n\}/);
+  assert.ok(body, "achievementImage must exist in public/app.js");
+
+  const dom = makeDom();
+  const deps = {
+    document: dom.document,
+    initialFor: name => String(name || "U").trim().charAt(0).toUpperCase() || "U"
+  };
+  const names = Object.keys(deps);
+
+  const achievementImage = new Function(...names, `${body[0]}; return achievementImage;`)(
+    ...names.map(name => deps[name])
+  );
+
+  assert.equal(achievementImage({ name: "First session", icon: "*" }).textContent, "*",
+    "the icon column has always been stored and returned; it must actually render");
+  assert.equal(achievementImage({ name: "First session", icon: null }).textContent, "F");
+  assert.equal(achievementImage({ name: "First session", icon: "" }).textContent, "F");
+});

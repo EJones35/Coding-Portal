@@ -637,6 +637,86 @@ function pictureProblem(file) {
   return null;
 }
 
+// Every picture input outside the profile page shows the chosen image itself,
+// not just the file name a native file input leaves you with. One helper for
+// all of them, so the three cannot drift apart.
+//
+// The object URL is revoked the moment it is replaced or cleared. A decoded
+// image kept alive by a stale URL is a leak, and the profile preview already
+// works this way - this is the same pattern, generalised.
+function createPicturePreview(input, options = {}) {
+  const { clearable = true, onClear = null } = options;
+
+  const tile = document.createElement("div");
+  tile.className = "picture-preview";
+  tile.hidden = true;
+  tile.setAttribute("aria-hidden", "true");
+
+  const note = document.createElement("p");
+  note.className = "settings-help picture-preview-note";
+  note.hidden = true;
+
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "text-button";
+  clear.textContent = "Clear selection";
+  clear.hidden = true;
+
+  let url = null;
+
+  function reset() {
+    if (url) {
+      URL.revokeObjectURL(url);
+      url = null;
+    }
+    tile.replaceChildren();
+    tile.hidden = true;
+    note.classList.remove("error");
+    note.textContent = "";
+    note.hidden = true;
+    clear.hidden = true;
+  }
+
+  /** Show a chosen file, or explain why it was refused. */
+  function show(file, problem) {
+    reset();
+
+    if (problem) {
+      note.classList.add("error");
+      note.textContent = problem;
+      note.hidden = false;
+      return;
+    }
+    if (!file) return;
+
+    note.textContent = `${file.name} (${formatBytes(file.size)})`;
+    note.hidden = false;
+
+    url = URL.createObjectURL(file);
+    const image = document.createElement("img");
+    image.alt = "";
+    image.addEventListener("error", () => {
+      reset();
+      note.classList.add("error");
+      note.textContent = "That file could not be previewed. Try a different image.";
+      note.hidden = false;
+    }, { once: true });
+    image.src = url;
+
+    tile.append(image);
+    tile.hidden = false;
+    if (clearable) clear.hidden = false;
+  }
+
+  clear.addEventListener("click", () => {
+    reset();
+    input.value = "";
+    if (onClear) onClear();
+  });
+
+  return { tile, note, clear, show, reset };
+}
+
 profilePictureInput.addEventListener("change", () => {
   const file = profilePictureInput.files && profilePictureInput.files[0];
 
@@ -2270,6 +2350,11 @@ function achievementImage(item, className = "achievement-icon") {
     image.src = item.pictureUrl;
     box.append(image);
     box.classList.add("has-image");
+  } else if (item.icon) {
+    // The icon column has been stored, validated and returned by the API since
+    // the first achievements pass, but nothing ever rendered it - an
+    // administrator could set one and see the first letter of the name instead.
+    box.textContent = item.icon;
   } else {
     box.textContent = initialFor(item.name);
   }
@@ -2459,14 +2544,59 @@ function renderAchievements(achievements, allUsers, allGroups) {
     const count = document.createElement("span");
     count.className = "group-count";
     count.textContent = `${item.winners.length} earned`;
-    head.append(icon, title, count);
+
+    // Name, description and icon could be set once at creation and never
+    // changed again from the portal - the PATCH route has accepted all three
+    // since the first pass, so the only missing half was this form.
+    const editButton = createActionButton("Edit");
+    editButton.classList.add("achievement-edit-button");
+
+    head.append(icon, title, count, editButton);
     card.append(head);
+
+    const editor = document.createElement("div");
+    editor.className = "achievement-editor";
+    editor.hidden = true;
+
+    const nameField = document.createElement("input");
+    nameField.value = item.name;
+    nameField.maxLength = 80;
+    nameField.setAttribute("aria-label", "Name for " + item.name);
+
+    const descriptionField = document.createElement("input");
+    descriptionField.value = item.description || "";
+    descriptionField.maxLength = 500;
+    descriptionField.placeholder = "Optional";
+    descriptionField.setAttribute("aria-label", "Description for " + item.name);
+
+    const iconField = document.createElement("input");
+    iconField.value = item.icon || "";
+    iconField.maxLength = 8;
+    iconField.placeholder = "Optional, up to 8 characters";
+    iconField.setAttribute("aria-label", "Icon for " + item.name);
+
+    const editorActions = document.createElement("div");
+    editorActions.className = "achievement-editor-actions";
+
+    const saveDetails = createActionButton("Save details");
+    const cancelEdit = createActionButton("Cancel");
+    editorActions.append(saveDetails, cancelEdit);
+
+    editor.append(
+      labelled("Name", nameField),
+      labelled("Description", descriptionField),
+      labelled("Icon", iconField),
+      editorActions
+    );
 
     // Picture upload, per achievement.
     const pictureInput = document.createElement("input");
     pictureInput.type = "file";
     pictureInput.accept = "image/png,image/jpeg,image/webp,image/gif";
     pictureInput.setAttribute("aria-label", "Picture for " + item.name);
+
+    // Uploaded the moment it is chosen, so there is no selection to clear.
+    const picturePreview = createPicturePreview(pictureInput, { clearable: false });
 
     const removePicture = document.createElement("button");
     removePicture.type = "button";
@@ -2493,10 +2623,93 @@ function renderAchievements(achievements, allUsers, allGroups) {
     pictureInput.addEventListener("change", () => {
       const file = pictureInput.files && pictureInput.files[0];
       if (!file) return;
+
+      // Cleared straight away so choosing the very same file again still fires
+      // a change event. The preview is driven by `file`, not by the input.
+      pictureInput.value = "";
+
+      const problem = pictureProblem(file);
+      if (problem) {
+        picturePreview.show(null, problem);
+        state.textContent = problem;
+        state.classList.add("error");
+        return;
+      }
+
+      // The chosen image appears immediately rather than after the round trip.
+      picturePreview.show(file);
       const form = new FormData();
       form.append("picture", file);
-      pictureInput.value = "";
       sendPicture(form, false);
+    });
+
+    function setEditing(on) {
+      editor.hidden = !on;
+      editButton.hidden = on;
+      if (on) {
+        nameField.focus();
+        return;
+      }
+      // Cancel restores what is stored, so a half-typed change is not left
+      // sitting in the fields looking saved.
+      nameField.value = item.name;
+      descriptionField.value = item.description || "";
+      iconField.value = item.icon || "";
+    }
+
+    editButton.addEventListener("click", () => setEditing(true));
+    cancelEdit.addEventListener("click", () => setEditing(false));
+
+    saveDetails.addEventListener("click", async () => {
+      const wanted = {
+        name: nameField.value.trim(),
+        description: descriptionField.value.trim(),
+        icon: iconField.value.trim()
+      };
+
+      if (!wanted.name) {
+        state.textContent = "An achievement needs a name.";
+        state.classList.add("error");
+        nameField.focus();
+        return;
+      }
+      if (wanted.icon.length > 8 || /[^\x20-\x7E]/.test(wanted.icon)) {
+        state.textContent = "Icon must be 8 plain characters or fewer.";
+        state.classList.add("error");
+        iconField.focus();
+        return;
+      }
+
+      // Only what actually changed is sent, so saving an untouched form is a
+      // no-op rather than a write with identical values.
+      const changes = {};
+      if (wanted.name !== item.name) changes.name = wanted.name;
+      if (wanted.description !== (item.description || "")) changes.description = wanted.description;
+      if (wanted.icon !== (item.icon || "")) changes.icon = wanted.icon;
+
+      if (!Object.keys(changes).length) {
+        state.textContent = "Nothing to save yet.";
+        state.classList.remove("error");
+        return;
+      }
+
+      saveDetails.disabled = true;
+      state.textContent = "Saving...";
+      state.classList.remove("error");
+
+      try {
+        await apiFetch("/api/admin/achievements/" + encodeURIComponent(item.id), {
+          method: "PATCH",
+          body: JSON.stringify(changes)
+        }, "Achievement update");
+        showAchievementsMessage(`Updated "${wanted.name}".`);
+        await loadAchievements();
+      } catch (error) {
+        state.textContent = error.message;
+        state.classList.add("error");
+      } finally {
+        saveDetails.disabled = false;
+      }
     });
 
     removePicture.addEventListener("click", () => {
@@ -2753,9 +2966,15 @@ function renderAchievements(achievements, allUsers, allGroups) {
 
     const pictureBlock = document.createElement("div");
     pictureBlock.className = "achievement-picture-block";
-    pictureBlock.append(labelled("Picture", pictureInput), removePicture);
+    pictureBlock.append(
+      labelled("Picture", pictureInput),
+      picturePreview.tile,
+      picturePreview.note,
+      removePicture
+    );
 
     card.append(
+      editor,
       labelled("Who can see it", mode),
       visibilityFold.wrap,
       pictureBlock,
@@ -2767,6 +2986,37 @@ function renderAchievements(achievements, allUsers, allGroups) {
     target.append(card);
   }
 }
+
+const achievementCreateInput = el("#achievement-picture-input");
+const achievementCreatePreview = createPicturePreview(achievementCreateInput);
+
+el("#achievement-picture-preview").append(
+  achievementCreatePreview.tile,
+  achievementCreatePreview.note,
+  achievementCreatePreview.clear
+);
+
+achievementCreateInput.addEventListener("change", () => {
+  const file = achievementCreateInput.files && achievementCreateInput.files[0];
+  if (!file) {
+    achievementCreatePreview.reset();
+    return;
+  }
+
+  const problem = pictureProblem(file);
+  if (problem) {
+    achievementCreatePreview.show(null, problem);
+    return;
+  }
+
+  achievementCreatePreview.show(file);
+});
+
+// The form is reset after a successful create, so the preview has to go with
+// it - otherwise the last picture stays on screen next to an empty form.
+el("#achievement-create-form").addEventListener("reset", () => {
+  achievementCreatePreview.reset();
+});
 
 el("#achievement-create-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -2937,6 +3187,28 @@ function renderGroups(allUsers) {
     pictureNote.className = "settings-help";
     pictureNote.textContent = "PNG, JPEG, WebP or GIF, up to 350 KB.";
 
+    // A chosen picture shows itself before Save details uploads it, rather than
+    // leaving only the file name that a native file input displays.
+    const picturePreview = createPicturePreview(pictureInput);
+
+    pictureInput.addEventListener("change", () => {
+      const file = pictureInput.files && pictureInput.files[0];
+      if (!file) {
+        picturePreview.reset();
+        return;
+      }
+
+      const problem = pictureProblem(file);
+      if (problem) {
+        picturePreview.show(null, problem);
+        return;
+      }
+
+      // Deliberately not cleared here: Save details reads the input's own
+      // files when it uploads.
+      picturePreview.show(file);
+    });
+
     const removePicture = document.createElement("button");
     removePicture.type = "button";
     removePicture.className = "text-button";
@@ -2949,6 +3221,9 @@ function renderGroups(allUsers) {
       labelled("Name", nameInput),
       labelled("Description", descriptionInput),
       labelled("Picture", pictureInput),
+      picturePreview.tile,
+      picturePreview.note,
+      picturePreview.clear,
       pictureNote,
       removePicture
     );
