@@ -1119,26 +1119,42 @@ const SESSION_AUDIENCE_SQL = `(
              WHERE sg.session_id = ? AND gm.user_id = u.id)
 )`;
 
-// Who may see an achievement. The caller is filtered by their own grants in
-// SQL, exactly like session visibility, so a hidden achievement is absent from
-// the response rather than hidden by the browser.
+// Who may see an achievement: everyone, or only the people and groups named in
+// the visibility tables. The caller is filtered by their own grants in SQL,
+// exactly like session visibility, so an achievement they may not see is absent
+// from the response rather than hidden by the browser.
+//
+// THERE IS NO "EVERYONE EXCEPT" MODE. Until 23 Oct 2026 `mode = 'everyone'`
+// meant "everyone except the members and groups marked invisible", which made
+// the visibility list mean the opposite of itself depending on the mode - Ethan
+// called it backwards and he was right. The tables now only ever list people who
+// CAN see a restricted achievement, and `everyone` means literally everyone.
 const ACHIEVEMENT_VISIBILITY_SQL = `(
   a.mode = 'everyone'
-  AND NOT EXISTS (SELECT 1 FROM achievement_user_visibility uv
-                  WHERE uv.achievement_id = a.id AND uv.user_id = ? AND uv.visible = 0)
-  AND NOT EXISTS (SELECT 1 FROM achievement_group_visibility gv
-                  JOIN group_members gm ON gm.group_id = gv.group_id
-                  WHERE gv.achievement_id = a.id AND gm.user_id = ? AND gv.visible = 0)
-) OR (
-  a.mode = 'restricted'
-  AND (
-    EXISTS (SELECT 1 FROM achievement_user_visibility uv
-            WHERE uv.achievement_id = a.id AND uv.user_id = ? AND uv.visible = 1)
-    OR EXISTS (SELECT 1 FROM achievement_group_visibility gv
-               JOIN group_members gm ON gm.group_id = gv.group_id
-               WHERE gv.achievement_id = a.id AND gm.user_id = ? AND gv.visible = 1)
+  OR (
+    a.mode = 'restricted'
+    AND (
+      EXISTS (SELECT 1 FROM achievement_user_visibility uv
+              WHERE uv.achievement_id = a.id AND uv.user_id = ? AND uv.visible = 1)
+      OR EXISTS (SELECT 1 FROM achievement_group_visibility gv
+                 JOIN group_members gm ON gm.group_id = gv.group_id
+                 WHERE gv.achievement_id = a.id AND gm.user_id = ? AND gv.visible = 1)
+    )
   )
 )`;
+
+// The same rule for one member, so an award can be refused for somebody who
+// cannot see the achievement they are being given.
+async function canSeeAchievement(env, achievementId, userId) {
+  const row = await env.DB.prepare(`
+    SELECT 1 AS allowed
+    FROM achievements a
+    WHERE a.id = ? AND ${ACHIEVEMENT_VISIBILITY_SQL}
+  `).bind(achievementId, userId, userId).first();
+
+  return Boolean(row);
+}
+
 
 async function readAchievement(env, row) {
   const awarded = await env.DB.prepare(`
@@ -1172,6 +1188,23 @@ async function readAchievement(env, row) {
     ORDER BY COALESCE(u.display_name_override, u.preferred_name, u.provider_name) COLLATE NOCASE
   `).bind(row.id).all();
 
+  // Who can be awarded this: exactly the members who can see it. Computed here
+  // rather than in the browser so the award list and the award endpoint cannot
+  // disagree about who is eligible. Admin responses only.
+  const audience = row.mode === "everyone"
+    ? await env.DB.prepare("SELECT id FROM users WHERE status = 'active'").all()
+    : await env.DB.prepare(`
+        SELECT u.id
+        FROM users u
+        WHERE u.status = 'active' AND (
+          EXISTS (SELECT 1 FROM achievement_user_visibility uv
+                  WHERE uv.achievement_id = ? AND uv.user_id = u.id AND uv.visible = 1)
+          OR EXISTS (SELECT 1 FROM achievement_group_visibility gv
+                     JOIN group_members gm ON gm.group_id = gv.group_id
+                     WHERE gv.achievement_id = ? AND gm.user_id = u.id AND gv.visible = 1)
+        )
+      `).bind(row.id, row.id).all();
+
   return {
     id: row.id,
     name: row.name,
@@ -1183,6 +1216,7 @@ async function readAchievement(env, row) {
       ? pictureUrlFor("group-avatars", row.id, row.picture_version, row.updated_at)
       : null,
     awardCount: awarded.count,
+    audience: (audience.results || []).map(entry => entry.id),
     winners: (winners.results || []).map(user => ({
       id: user.id,
       name: user.display_name_override || user.preferred_name || user.provider_name || "User",
@@ -1221,7 +1255,8 @@ async function handleAchievementApi(request, env, url) {
       ORDER BY a.name COLLATE NOCASE
       LIMIT 500
     `).bind(
-      session.id, session.id, session.id, session.id, session.id
+      // earned, then the two placeholders in ACHIEVEMENT_VISIBILITY_SQL.
+      session.id, session.id, session.id
     ).all();
 
     return json({
@@ -1335,7 +1370,7 @@ async function handleAdminAchievementApi(request, env, url, auth) {
       return json({ error: "Invalid achievement or subject ID" }, 400);
     }
 
-    const achievement = await env.DB.prepare("SELECT id FROM achievements WHERE id = ?")
+    const achievement = await env.DB.prepare("SELECT id, mode FROM achievements WHERE id = ?")
       .bind(achievementId).first();
     if (!achievement) return json({ error: "Achievement not found" }, 404);
 
@@ -1362,11 +1397,30 @@ async function handleAdminAchievementApi(request, env, url, auth) {
       return json({ error: "Invalid visibility settings" }, 400);
     }
 
-    await env.DB.prepare(`
-      INSERT INTO ${table} (achievement_id, ${column}, visible)
-      VALUES (?, ?, ?)
-      ON CONFLICT(achievement_id, ${column}) DO UPDATE SET visible = excluded.visible
-    `).bind(achievementId, subjectId, body.visible ? 1 : 0).run();
+    // An achievement shown to everyone has no list, so there is nothing here to
+    // change. Refusing keeps the tables a pure list of who can see it instead of
+    // collecting rows that mean nothing until somebody flips the mode.
+    if (achievement.mode !== "restricted") {
+      return json({
+        error: "This achievement is shown to everyone. Switch it to \"Only specific people and groups\" to choose who can see it."
+      }, 409);
+    }
+
+    // Unchecking REMOVES the row rather than storing visible = 0. These tables
+    // are now a list of who can see a restricted achievement, so absence is the
+    // answer - a stored 0 would be a second way to say the same thing, and two
+    // ways to say one thing is how the old mode-dependent reading went wrong.
+    if (body.visible) {
+      await env.DB.prepare(`
+        INSERT INTO ${table} (achievement_id, ${column}, visible)
+        VALUES (?, ?, 1)
+        ON CONFLICT(achievement_id, ${column}) DO UPDATE SET visible = 1
+      `).bind(achievementId, subjectId).run();
+    } else {
+      await env.DB.prepare(
+        `DELETE FROM ${table} WHERE achievement_id = ? AND ${column} = ?`
+      ).bind(achievementId, subjectId).run();
+    }
 
     await writeAudit(env, auth.session.id, "admin.achievement.visibility.updated", achievementId, {
       targetType: "achievement",
@@ -1420,6 +1474,15 @@ async function handleAdminAchievementApi(request, env, url, auth) {
         "SELECT id FROM users WHERE id = ? AND status = 'active'"
       ).bind(userId).first();
       if (!target) return json({ error: "Active member not found" }, 404);
+
+      // An achievement can only be given to somebody who can see it, otherwise
+      // it lands on a member whose own page will never show it - the badge
+      // exists and cannot be seen, which is worse than not awarding it.
+      if (!(await canSeeAchievement(env, achievementId, userId))) {
+        return json({
+          error: "That member cannot see this achievement, so it cannot be awarded to them."
+        }, 409);
+      }
 
       await env.DB.prepare(`
         INSERT INTO achievement_awards (achievement_id, user_id, granted_by)
@@ -1600,6 +1663,17 @@ async function handleAdminAchievementApi(request, env, url, auth) {
       SET name = ?, description = ?, icon = ?, mode = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).bind(next.name, next.description, next.icon, next.mode, id).run();
+
+    // "Shown to everyone" now means everyone, full stop, so any visibility rows
+    // are dropped when an achievement moves into that mode. Leaving them would
+    // put a list on screen that restricts nothing and would silently come back
+    // to life the next time the achievement was narrowed again.
+    if (next.mode === "everyone" && current.mode !== "everyone") {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM achievement_user_visibility WHERE achievement_id = ?").bind(id),
+        env.DB.prepare("DELETE FROM achievement_group_visibility WHERE achievement_id = ?").bind(id)
+      ]);
+    }
 
     await writeAudit(env, auth.session.id, "admin.achievement.updated", id, {
       targetType: "achievement",

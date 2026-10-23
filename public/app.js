@@ -2503,21 +2503,22 @@ function rememberAchievementFold(id, collapsed) {
   writeUiState({ achievementFolds: folds });
 }
 
-// One line that says what the checkboxes underneath currently mean, so the
-// admin never has to open a list of twenty checkboxes to read one fact.
-function visibilitySummaryText(mode, userHidden, groupHidden) {
-  if (mode === "restricted") {
-    const people = [...userHidden.values()].filter(Boolean).length;
-    const groups = [...groupHidden.values()].filter(Boolean).length;
-    if (!people && !groups) return "Shown to nobody yet";
-    const parts = [];
-    if (people) parts.push(`${people} ${people === 1 ? "person" : "people"}`);
-    if (groups) parts.push(`${groups} ${groups === 1 ? "group" : "groups"}`);
-    return `Shown to ${parts.join(" and ")}`;
-  }
-  const hidden = [...userHidden.values()].filter(value => !value).length
-    + [...groupHidden.values()].filter(value => !value).length;
-  return hidden ? `Shown to everyone except ${hidden}` : "Shown to everyone";
+// One line that says who can see the achievement, so the admin never has to
+// open a list of twenty checkboxes to read one fact.
+//
+// There is no "everyone except" reading any more (23 Oct 2026). A ticked box
+// means that person can see it, in both modes; `everyone` means literally
+// everyone and carries no list at all.
+function visibilitySummaryText(mode, userVisible, groupVisible) {
+  if (mode !== "restricted") return "Everyone can see this";
+
+  const people = [...userVisible.values()].filter(Boolean).length;
+  const groups = [...groupVisible.values()].filter(Boolean).length;
+  if (!people && !groups) return "Shown to nobody yet";
+  const parts = [];
+  if (people) parts.push(`${people} ${people === 1 ? "person" : "people"}`);
+  if (groups) parts.push(`${groups} ${groups === 1 ? "group" : "groups"}`);
+  return `Shown to ${parts.join(" and ")}`;
 }
 
 function renderAchievements(achievements, allUsers, allGroups) {
@@ -2753,7 +2754,7 @@ function renderAchievements(achievements, allUsers, allGroups) {
     mode.setAttribute("aria-label", "Who can see " + item.name);
     for (const [value, label] of [
       ["everyone", "Shown to everyone"],
-      ["restricted", "Only listed people and groups"]
+      ["restricted", "Only specific people and groups"]
     ]) {
       const option = document.createElement("option");
       option.value = value;
@@ -2764,57 +2765,37 @@ function renderAchievements(achievements, allUsers, allGroups) {
 
     mode.addEventListener("change", async () => {
       mode.disabled = true;
+      state.textContent = "Saving...";
+      state.classList.remove("error");
       try {
         await apiFetch("/api/admin/achievements/" + encodeURIComponent(item.id), {
           method: "PATCH",
           body: JSON.stringify({ mode: mode.value })
         }, "Achievement update");
-        state.textContent = mode.value === "restricted"
-          ? "Now only the listed people and groups can see it"
-          : "Now shown to everyone except anyone hidden";
-        // The same checkboxes mean opposite things in the two modes, so switching
-        // has to re-check them and re-label what they mean. Leaving them as they
-        // were would have shown a list of "shown to" people under a mode that no
-        // longer reads that way.
-        item.mode = mode.value;
-        syncVisibilityBoxes(item.mode);
-        visibilityLabel.textContent = item.mode === "restricted" ? "Shown to" : "Hidden from";
-        syncVisibilitySummary();
+
+        // Reload rather than adjust the card by hand. Switching to "everyone"
+        // clears the stored visibility list server-side and changes who can be
+        // awarded, so re-reading is the only way this card shows what is truly
+        // stored instead of what it was about to assume.
+        await loadAchievements();
       } catch (error) {
         mode.value = item.mode;
         state.textContent = error.message;
         state.classList.add("error");
-      } finally {
         mode.disabled = false;
       }
     });
 
-    // --- Per-user and per-group show/hide ----------------------------------
+    // --- Who can see it ---------------------------------------------------
+    // Every box reads one way now: ticked means that person can see it. Clearing
+    // a box deletes the row on the server, so "not ticked" and "no row" are the
+    // same fact and cannot drift apart - that drift is exactly what made the old
+    // mode-dependent reading so easy to get wrong.
     const visibility = document.createElement("div");
     visibility.className = "achievement-visibility";
 
-    const userHidden = new Map(item.userVisibility.map(entry => [entry.id, entry.visible]));
-    const groupHidden = new Map(item.groupVisibility.map(entry => [entry.id, entry.visible]));
-
-    const userBoxes = [];
-    const groupBoxes = [];
-
-    // A checkbox means "can see this one", which means opposite things depending
-    // on the mode: in `restricted` it is the list of who has been given it, in
-    // `everyone` it is the exceptions. Both readings live here so switching mode
-    // re-labels and re-checks the same controls rather than leaving them lying.
-    function syncVisibilityBoxes(mode) {
-      for (const [box, id] of userBoxes) {
-        box.checked = mode === "restricted"
-          ? Boolean(userHidden.get(id))
-          : !userHidden.has(id) || userHidden.get(id) === true;
-      }
-      for (const [box, id] of groupBoxes) {
-        box.checked = mode === "restricted"
-          ? Boolean(groupHidden.get(id))
-          : !groupHidden.has(id) || groupHidden.get(id) === true;
-      }
-    }
+    const userVisible = new Map(item.userVisibility.map(entry => [entry.id, entry.visible]));
+    const groupVisible = new Map(item.groupVisibility.map(entry => [entry.id, entry.visible]));
 
     async function toggle(kind, subjectId, visible) {
       state.textContent = "Saving...";
@@ -2826,60 +2807,63 @@ function renderAchievements(achievements, allUsers, allGroups) {
           { method: "PUT", body: JSON.stringify({ visible }) },
           "Achievement visibility"
         );
-        state.textContent = visible ? "Shown" : "Hidden";
-        setTimeout(() => { if (state.textContent === "Shown" || state.textContent === "Hidden") state.textContent = ""; }, 2500);
+        state.textContent = visible ? "Shown" : "Not shown";
+        setTimeout(() => { if (state.textContent === "Shown" || state.textContent === "Not shown") state.textContent = ""; }, 2500);
+        // Adding or removing someone from visibility changes who can be awarded,
+        // so re-read the card rather than leaving the award list stale.
+        await loadAchievements();
       } catch (error) {
         state.textContent = error.message;
         state.classList.add("error");
       }
     }
 
-    for (const user of allUsers) {
-      if (user.status !== "active") continue;
-      const row = document.createElement("label");
-      row.className = "visibility-option";
+    if (item.mode === "restricted") {
+      for (const user of allUsers) {
+        if (user.status !== "active") continue;
+        const row = document.createElement("label");
+        row.className = "visibility-option";
 
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      // Checked means visible to this person, honouring the achievement's mode.
-      box.checked = item.mode === "restricted"
-        ? Boolean(userHidden.get(user.id))
-        : !userHidden.has(user.id) || userHidden.get(user.id) === true;
-      userBoxes.push([box, user.id]);
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = Boolean(userVisible.get(user.id));
 
-      box.addEventListener("change", () => {
-        userHidden.set(user.id, box.checked);
-        syncVisibilitySummary();
-        toggle("users", user.id, box.checked);
-      });
+        box.addEventListener("change", () => {
+          userVisible.set(user.id, box.checked);
+          syncVisibilitySummary();
+          toggle("users", user.id, box.checked);
+        });
 
-      const text = document.createElement("span");
-      text.textContent = user.name;
-      row.append(box, text);
-      visibility.append(row);
-    }
+        const text = document.createElement("span");
+        text.textContent = user.name;
+        row.append(box, text);
+        visibility.append(row);
+      }
 
-    for (const group of allGroups) {
-      const row = document.createElement("label");
-      row.className = "visibility-option";
+      for (const group of allGroups) {
+        const row = document.createElement("label");
+        row.className = "visibility-option";
 
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.checked = item.mode === "restricted"
-        ? Boolean(groupHidden.get(group.id))
-        : !groupHidden.has(group.id) || groupHidden.get(group.id) === true;
-      groupBoxes.push([box, group.id]);
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = Boolean(groupVisible.get(group.id));
 
-      box.addEventListener("change", () => {
-        groupHidden.set(group.id, box.checked);
-        syncVisibilitySummary();
-        toggle("groups", group.id, box.checked);
-      });
+        box.addEventListener("change", () => {
+          groupVisible.set(group.id, box.checked);
+          syncVisibilitySummary();
+          toggle("groups", group.id, box.checked);
+        });
 
-      const text = document.createElement("span");
-      text.textContent = group.name;
-      row.append(box, text);
-      visibility.append(row);
+        const text = document.createElement("span");
+        text.textContent = group.name;
+        row.append(box, text);
+        visibility.append(row);
+      }
+    } else {
+      const note = document.createElement("p");
+      note.className = "settings-help";
+      note.textContent = "Everyone can see this achievement, so there is no list to manage. Choose \"Only specific people and groups\" above to restrict it to a chosen few.";
+      visibility.append(note);
     }
 
     // --- Who has earned it ------------------------------------------------
@@ -2887,9 +2871,16 @@ function renderAchievements(achievements, allUsers, allGroups) {
     winners.className = "group-members";
 
     const awarded = new Set(item.winners.map(winner => winner.id));
+    const audience = new Set(item.audience || []);
+    const activeUsers = allUsers.filter(user => user.status === "active");
+    const awardable = activeUsers.filter(user => audience.has(user.id));
 
-    for (const user of allUsers) {
-      if (user.status !== "active") continue;
+    // Only somebody who can see an achievement can be given it; the API refuses
+    // the award too. A member who already has one but can no longer see it stays
+    // in the list so it can be taken back - revoke only, and said out loud.
+    const unreachable = item.winners.filter(winner => !audience.has(winner.id));
+
+    function awardRow(user, revokeOnly) {
       const row = document.createElement("div");
       row.className = "member-identity group-member";
       row.append(createAvatarChip(user));
@@ -2897,6 +2888,13 @@ function renderAchievements(achievements, allUsers, allGroups) {
       const text = document.createElement("span");
       text.textContent = user.name;
       row.append(text);
+
+      if (revokeOnly) {
+        const why = document.createElement("span");
+        why.className = "group-count";
+        why.textContent = "can no longer see this";
+        row.append(why);
+      }
 
       const button = document.createElement("button");
       button.type = "button";
@@ -2919,8 +2917,18 @@ function renderAchievements(achievements, allUsers, allGroups) {
         }
       });
       row.append(button);
-      winners.append(row);
+      return row;
     }
+
+    if (!awardable.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-state";
+      empty.textContent = "Nobody can see this achievement yet, so there is nobody to award it to.";
+      winners.append(empty);
+    }
+
+    for (const user of awardable) winners.append(awardRow(user, false));
+    for (const winner of unreachable) winners.append(awardRow(winner, true));
 
     const remove = createActionButton("Delete achievement");
     remove.classList.add("danger-link");
@@ -2941,7 +2949,7 @@ function renderAchievements(achievements, allUsers, allGroups) {
 
     const visibilityLabel = document.createElement("div");
     visibilityLabel.className = "achievement-fold-label";
-    visibilityLabel.textContent = item.mode === "restricted" ? "Shown to" : "Hidden from";
+    visibilityLabel.textContent = "Shown to";
 
     // Closed by default. The state that matters is on the summary line; the
     // controls behind it are for when somebody actually needs to change one.
@@ -2951,11 +2959,11 @@ function renderAchievements(achievements, allUsers, allGroups) {
     const rememberOpen = open => rememberAchievementFold(item.id, !open);
 
     const visibilityFold = achievementFold(
-      visibilitySummaryText(item.mode, userHidden, groupHidden),
+      visibilitySummaryText(item.mode, userVisible, groupVisible),
       visibility,
       rememberOpen
     );
-    visibilityFold.body.prepend(visibilityLabel);
+    if (item.mode === "restricted") visibilityFold.body.prepend(visibilityLabel);
 
     const winnersFold = achievementFold(
       item.winners.length
@@ -2966,7 +2974,7 @@ function renderAchievements(achievements, allUsers, allGroups) {
     );
 
     function syncVisibilitySummary() {
-      visibilityFold.summary.textContent = visibilitySummaryText(item.mode, userHidden, groupHidden);
+      visibilityFold.summary.textContent = visibilitySummaryText(item.mode, userVisible, groupVisible);
     }
 
     visibilityFold.sync(detailsOpen);

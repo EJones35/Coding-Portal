@@ -2079,33 +2079,155 @@ test("achievements are administrator-only to manage and readable when signed in"
   })).status, 403);
 });
 
-test("an achievement can be hidden from a specific person", async () => {
+test("an achievement shown to everyone is shown to every member, with no exception list", async () => {
   const harness = createHarness();
   const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
-  const hidden = await harness.addUser({ displayName: "Hidden" });
-  const other = await harness.addUser({ displayName: "Other" });
-  const hiddenSession = await harness.signIn(hidden);
-  const otherSession = await harness.signIn(other);
-
+  const member = await harness.addUser({ displayName: "Member" });
   const item = await createAchievement(harness, admin);
 
-  const set = await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${hidden}`, {
+  assert.equal(item.mode, "everyone");
+
+  // Asking to hide it from one person is refused outright. `everyone` means
+  // everyone now; the old "everyone except these people" reading is gone.
+  const refused = await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${member}`, {
     method: "PUT", session: admin, body: JSON.stringify({ visible: false })
   });
-  assert.equal(set.status, 200);
+  assert.equal(refused.status, 409);
+  assert.match((await json(refused)).error, /shown to everyone/);
 
-  const hiddenList = await json(await call(harness, "/api/achievements", { session: hiddenSession }));
-  assert.equal(hiddenList.achievements.length, 0, "a hidden achievement must not appear at all");
+  const list = await json(await call(harness, "/api/achievements", {
+    session: await harness.signIn(member)
+  }));
+  assert.equal(list.achievements.length, 1, "everyone can see it");
+});
 
-  const otherList = await json(await call(harness, "/api/achievements", { session: otherSession }));
-  assert.equal(otherList.achievements.length, 1, "hiding from one person must not hide it from everyone");
+test("clearing a box removes somebody from the list instead of hiding them", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const member = await harness.addUser({ displayName: "Member" });
+  const item = await createAchievement(harness, admin, { mode: "restricted" });
 
-  // Showing it again brings it back.
-  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${hidden}`, {
+  const url = `/api/admin/achievements/${item.id}/visibility/users/${member}`;
+
+  assert.equal((await call(harness, url, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  })).status, 200);
+
+  const visible = await json(await call(harness, "/api/achievements", {
+    session: await harness.signIn(member)
+  }));
+  assert.equal(visible.achievements.length, 1, "a ticked box means they can see it");
+
+  assert.equal((await call(harness, url, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: false })
+  })).status, 200);
+
+  const rows = await harness.DB.prepare(
+    "SELECT COUNT(*) AS count FROM achievement_user_visibility WHERE achievement_id = ? AND user_id = ?"
+  ).bind(item.id, member).first();
+  assert.equal(rows.count, 0, "unticking must delete the row, not store visible = 0");
+
+  const gone = await json(await call(harness, "/api/achievements", {
+    session: await harness.signIn(member)
+  }));
+  assert.equal(gone.achievements.length, 0);
+});
+
+test("switching an achievement to everyone clears the stored list", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const member = await harness.addUser({ displayName: "Member" });
+  const item = await createAchievement(harness, admin, { mode: "restricted" });
+
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${member}`, {
     method: "PUT", session: admin, body: JSON.stringify({ visible: true })
   });
-  const back = await json(await call(harness, "/api/achievements", { session: hiddenSession }));
-  assert.equal(back.achievements.length, 1);
+
+  const stored = await harness.DB.prepare(
+    "SELECT COUNT(*) AS count FROM achievement_user_visibility WHERE achievement_id = ?"
+  ).bind(item.id).first();
+  assert.equal(stored.count, 1);
+
+  const patched = await call(harness, `/api/admin/achievements/${item.id}`, {
+    method: "PATCH", session: admin, body: JSON.stringify({ mode: "everyone" })
+  });
+  assert.equal(patched.status, 200);
+
+  const after = await harness.DB.prepare(
+    "SELECT COUNT(*) AS count FROM achievement_user_visibility WHERE achievement_id = ?"
+  ).bind(item.id).first();
+  assert.equal(after.count, 0, "a list under an everyone achievement restricts nothing, so it goes");
+
+  const list = await json(await call(harness, "/api/achievements", {
+    session: await harness.signIn(member)
+  }));
+  assert.equal(list.achievements.length, 1);
+});
+
+test("an achievement can only be awarded to somebody who can see it", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const listed = await harness.addUser({ displayName: "Listed" });
+  const outsider = await harness.addUser({ displayName: "Outsider" });
+  const item = await createAchievement(harness, admin, { mode: "restricted" });
+
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${listed}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  });
+
+  const refused = await call(harness, `/api/admin/achievements/${item.id}/award/${outsider}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ awarded: true })
+  });
+  assert.equal(refused.status, 409);
+  assert.match((await json(refused)).error, /cannot see this achievement/);
+
+  const counted = await harness.DB.prepare(
+    "SELECT COUNT(*) AS count FROM achievement_awards WHERE achievement_id = ? AND user_id = ?"
+  ).bind(item.id, outsider).first();
+  assert.equal(counted.count, 0, "a refused award must not be written");
+
+  assert.equal((await call(harness, `/api/admin/achievements/${item.id}/award/${listed}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ awarded: true })
+  })).status, 200);
+
+  // Revoking is always allowed, including for somebody the list no longer
+  // covers - otherwise an award made before the change could never be undone.
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${listed}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: false })
+  });
+  assert.equal((await call(harness, `/api/admin/achievements/${item.id}/award/${listed}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ awarded: false })
+  })).status, 200);
+});
+
+test("the admin view names exactly who can be awarded an achievement", async () => {
+  const harness = createHarness();
+  const admin = await harness.signIn(await harness.addUser({ role: "admin" }));
+  const listed = await harness.addUser({ displayName: "Listed" });
+  const outsider = await harness.addUser({ displayName: "Outsider" });
+  const item = await createAchievement(harness, admin, { mode: "restricted" });
+
+  await call(harness, `/api/admin/achievements/${item.id}/visibility/users/${listed}`, {
+    method: "PUT", session: admin, body: JSON.stringify({ visible: true })
+  });
+
+  const restricted = (await json(await call(harness, "/api/admin/achievements", {
+    session: admin
+  }))).achievements.find(entry => entry.id === item.id);
+  assert.deepEqual(restricted.audience, [listed], "the list is the audience, nobody else");
+
+  await call(harness, `/api/admin/achievements/${item.id}`, {
+    method: "PATCH", session: admin, body: JSON.stringify({ mode: "everyone" })
+  });
+
+  const everyone = (await json(await call(harness, "/api/admin/achievements", {
+    session: admin
+  }))).achievements.find(entry => entry.id === item.id);
+  assert.deepEqual(
+    everyone.audience.slice().sort(),
+    [admin.userId, listed, outsider].sort(),
+    "an everyone achievement names every active member"
+  );
 });
 
 test("a restricted achievement is visible only to the listed people and groups", async () => {
@@ -2491,18 +2613,13 @@ test("session status values are shown as words, not raw database values", () => 
 test("the achievement summary says who can see it without opening the list", () => {
   const summarise = loadAppFunction("visibilitySummaryText");
 
-  assert.equal(summarise("everyone", new Map(), new Map()), "Shown to everyone");
-
+  // "Everyone" means everyone, so there is no exception count to report. Rows
+  // that happen to be stored no longer change the sentence.
+  assert.equal(summarise("everyone", new Map(), new Map()), "Everyone can see this");
   assert.equal(
-    summarise("everyone", new Map([["u1", false]]), new Map()),
-    "Shown to everyone except 1",
-    "someone hidden from an everyone achievement is counted as an exception"
-  );
-
-  assert.equal(
-    summarise("everyone", new Map(), new Map([["g1", false]])),
-    "Shown to everyone except 1",
-    "a hidden group counts too, not only hidden people"
+    summarise("everyone", new Map([["u1", false]]), new Map([["g1", false]])),
+    "Everyone can see this",
+    "an everyone achievement carries no exceptions"
   );
 
   assert.equal(summarise("restricted", new Map(), new Map()), "Shown to nobody yet");
@@ -2522,6 +2639,12 @@ test("the achievement summary says who can see it without opening the list", () 
     summarise("restricted", new Map([["u1", true], ["u2", true]]), new Map([["g1", true], ["g2", true]])),
     "Shown to 2 people and 2 groups",
     "both kinds of subject are counted and named"
+  );
+
+  assert.equal(
+    summarise("restricted", new Map([["u1", false]]), new Map()),
+    "Shown to nobody yet",
+    "an unticked box is not a person you can see it"
   );
 });
 
@@ -2560,14 +2683,17 @@ test("an administrator can complete a session in one click", () => {
   assert.match(app, /actions\.append\(edit, attendance, complete, select\)/);
 });
 
-test("switching an achievement's visibility mode re-checks and re-labels the list", () => {
+test("switching an achievement's visibility mode reloads the card instead of guessing", () => {
   const app = appSource();
 
-  // A checkbox means "can see this", which is opposite in the two modes, so
-  // switching has to reconcile them rather than leave the old reading on screen.
-  assert.match(app, /function syncVisibilityBoxes\(mode\)/);
-  assert.match(app, /syncVisibilityBoxes\(item\.mode\);\s*\n\s*visibilityLabel\.textContent/);
-  assert.match(app, /syncVisibilitySummary\(\);/);
+  // Switching to "everyone" clears the stored list server-side and changes who
+  // can be awarded, so the card re-reads rather than reinterpreting the boxes
+  // it already has. There is no mode-dependent reading left to reconcile.
+  assert.equal(app.includes("syncVisibilityBoxes"), false,
+    "the mode-dependent checkbox reading must be gone, not merely unused");
+  assert.match(app, /body: JSON\.stringify\(\{ mode: mode\.value \}\)[\s\S]{0,400}await loadAchievements\(\);/);
+  assert.match(app, /if \(item\.mode === "restricted"\) \{\s*\n\s*for \(const user of allUsers\)/,
+    "the checkbox list is only built for a restricted achievement");
 });
 
 test("the achievement detail lists fold closed by default", () => {

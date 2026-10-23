@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080d18">
+  <meta name="description" content="Coding Sessions Portal - coding sessions, attendance and achievements.">
+  <title>Coding Sessions Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    // Applied before first paint so a saved light theme never flashes dark.
+    (function () {
+      try {
+        var stored = localStorage.getItem("csp-theme");
+        if (stored === "light" || stored === "dark") {
+          document.documentElement.dataset.theme = stored;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.content = stored === "light" ? "#eef3f9" : "#080d18";
+        }
+      } catch (error) {
+        // Storage unavailable (private mode). The dark default stands.
+      }
+    })();
+  </script>
+  <script src="/app.js" defer></script>
+<script>
+window.__smoke = { errors: [], logs: [] };
+window.addEventListener("error", function (event) {
+  window.__smoke.errors.push("ERROR: " + (event.message || "") + " @ " + (event.filename || "?") + ":" + (event.lineno || "?"));
+});
+window.addEventListener("unhandledrejection", function (event) {
+  var reason = event.reason;
+  window.__smoke.errors.push("REJECTION: " + (reason && reason.message ? reason.message : String(reason)));
+});
+(function () {
+  var wrap = function (name) {
+    var original = console[name];
+    console[name] = function () {
+      var line = Array.from(arguments).map(function (a) {
+        return a && a.message ? a.message : String(a);
+      }).join(" ");
+      // Network noise from the signed-out API calls is expected and is not a fault.
+      if (!/fetch|Failed to load|NetworkError|ERR_/i.test(line)) window.__smoke.logs.push(name + ": " + line);
+      return original.apply(console, arguments);
+    };
+  };
+  wrap("error");
+  wrap("warn");
+})();
+</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Main navigation">
+      <a class="brand" href="#home">
+        <span class="brand-mark" aria-hidden="true">C</span>
+        <span><strong>CODING SESSIONS</strong><small>PORTAL</small></span>
+      </a>
+
+      <nav class="nav-list" aria-label="Workspace">
+        <div class="nav-label">WORKSPACE</div>
+        <a class="nav-item active" href="#home" data-route="home">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 10v9.5h11V10"/><path d="M10 19.5v-5h4v5"/></svg>
+          Overview
+        </a>
+        <a class="nav-item" href="#sessions" data-route="sessions">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg>
+          Sessions
+          <span class="nav-count" id="sessions-nav-count" hidden></span>
+        </a>
+        <a class="nav-item" id="profile-nav" href="#profile" data-route="profile" hidden>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M4.8 19.5c1.3-3.6 4-5.4 7.2-5.4s5.9 1.8 7.2 5.4"/></svg>
+          My profile
+        </a>
+      </nav>
+
+      <nav class="nav-list nav-account" aria-label="Account">
+        <div class="nav-label">ACCOUNT</div>
+        <a class="nav-item" id="admin-nav" href="#admin" data-route="admin" hidden>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2.1"/><circle cx="15" cy="12" r="2.1"/><circle cx="8" cy="17" r="2.1"/></svg>
+          Admin panel
+        </a>
+        <a class="nav-item" id="settings-nav" href="#settings" data-route="settings" hidden>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 3.6v2.2M12 18.2v2.2M3.6 12h2.2M18.2 12h2.2M6.2 6.2l1.6 1.6M16.2 16.2l1.6 1.6M17.8 6.2l-1.6 1.6M7.8 16.2l-1.6 1.6"/></svg>
+          Settings
+        </a>
+      </nav>
+
+      <section class="account-panel sidebar-account" aria-labelledby="account-title">
+        <p id="auth-message" class="auth-message" role="status" aria-live="polite" hidden></p>
+        <div class="account-actions">
+          <a class="google-button" id="google-sign-in" href="/api/auth/google">
+            <span class="google-mark" aria-hidden="true">G</span>
+            Sign in with Google
+          </a>
+          <div id="signed-in-actions" hidden>
+            <div class="account-identity">
+              <span class="account-avatar" id="account-avatar" aria-hidden="true">C</span>
+              <div class="account-identity-text">
+                <strong id="account-name">Account</strong>
+                <span id="account-role">Member</span>
+              </div>
+            </div>
+            <button class="secondary-button" id="sign-out" type="button">Sign out</button>
+          </div>
+        </div>
+      </section>
+      <div class="sidebar-bottom"><span class="status-dot" aria-hidden="true"></span> PORTAL ONLINE <span class="version">v0.1.0</span></div>
+    </aside>
+
+    <main class="main-content" id="main">
+      <div class="preview-banner" id="preview-banner" role="status" hidden>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z"/><path d="M4.5 4.5l15 15"/></svg>
+        <span><strong>User preview mode.</strong> You are seeing the portal as a regular member. Administrator controls are hidden.</span>
+        <button class="secondary-button" id="preview-exit" type="button">Return to admin view</button>
+      </div>
+
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+      <section id="home">
+        <header class="topbar">
+          <div>
+            <div class="eyebrow">CODING SESSIONS / PORTAL</div>
+            <h1 id="page-title">Overview</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="environment" id="build-status"><span class="status-dot" aria-hidden="true"></span><span>CONNECTING</span></div>
+          </div>
+        </header>
+
+        <section class="next-session-card" id="next-session-card" hidden aria-labelledby="next-session-title">
+          <div class="next-session-copy">
+            <div class="eyebrow accent">NEXT UP</div>
+            <h3 id="next-session-title">-</h3>
+            <p class="next-session-meta" id="next-session-meta"></p>
+          </div>
+          <a class="secondary-button" href="#sessions" id="next-session-link">All sessions</a>
+        </section>
+
+        <section class="welcome-panel" aria-labelledby="welcome-title">
+          <div class="welcome-copy">
+            <div class="eyebrow accent">YOUR CODING WORKSPACE</div>
+            <h2 id="welcome-title">Your next chapter<br>starts here.</h2>
+            <p>Sign in to access your coding sessions, track your attendance and manage your account.</p>
+            <div class="status-line"><span class="status-dot" aria-hidden="true"></span><span id="api-status" role="status">Connecting to portal services...</span></div>
+          </div>
+          <div class="orbital" aria-hidden="true">
+            <div class="orbit orbit-one"></div>
+            <div class="orbit orbit-two"></div>
+            <div class="orbit-core">C</div>
+            <span class="orbit-node"></span>
+          </div>
+        </section>
+
+        <section class="section-heading">
+          <div><div class="eyebrow">YOUR WORKSPACE</div><h2>Portal modules</h2></div>
+          <span class="section-note">BUILT IN STAGES</span>
+        </section>
+
+        <section class="module-grid" aria-label="Portal modules">
+          <a class="module-card module-link" href="#profile" data-module-route="profile">
+            <div class="module-icon cyan"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.6"/><path d="M4.8 19.5c1.3-3.6 4-5.4 7.2-5.4s5.9 1.8 7.2 5.4"/></svg></div>
+            <div class="module-title">Personal profile</div>
+            <p>Your picture, name, progress and every session you have attended.</p>
+            <span class="module-state module-state-ready"><span class="state-indicator" aria-hidden="true"></span> AVAILABLE</span>
+          </a>
+          <a class="module-card module-link" href="#sessions" data-module-route="sessions">
+            <div class="module-icon violet"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5.5" width="16" height="14.5" rx="2"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/></svg></div>
+            <div class="module-title">Sessions</div>
+            <p>Find sessions made available to your account.</p>
+            <span class="module-state module-state-ready"><span class="state-indicator" aria-hidden="true"></span> AVAILABLE</span>
+          </a>
+          <a class="module-card module-link" href="#profile" data-module-route="profile">
+            <div class="module-icon amber"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l7 8-7 8-7-8z"/><path d="M12 8.5l3.2 3.5-3.2 3.5-3.2-3.5z"/></svg></div>
+            <div class="module-title">Achievements</div>
+            <p>Every badge you have earned, on your profile.</p>
+            <span class="module-state module-state-ready"><span class="state-indicator" aria-hidden="true"></span> AVAILABLE</span>
+          </a>
+        </section>
+      </section>
+
+      <section class="profile-panel" id="profile-panel" hidden aria-labelledby="profile-page-title">
+        <div class="profile-hero">
+          <span class="account-avatar profile-avatar" id="profile-avatar" aria-hidden="true">U</span>
+          <div class="profile-hero-copy">
+            <div class="eyebrow accent">MY PROFILE</div>
+            <h2 id="profile-page-title">Profile</h2>
+            <dl class="profile-identity">
+              <dt>Name</dt><dd id="profile-name">-</dd>
+              <dt>Email</dt><dd id="profile-email">-</dd>
+              <dt>Role</dt><dd id="profile-role">-</dd>
+              <dt>Member since</dt><dd id="profile-created">-</dd>
+            </dl>
+            <div class="profile-actions">
+              <a class="secondary-button" href="#settings" data-route-link="settings">Edit profile and picture</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="profile-stats" id="profile-stats">
+          <article class="admin-stat"><span>Sessions attended</span><strong id="profile-attended">-</strong></article>
+          <article class="admin-stat"><span>Excused</span><strong id="profile-excused">-</strong></article>
+          <article class="admin-stat"><span>Scheduled sessions</span><strong id="profile-upcoming">-</strong></article>
+          <article class="admin-stat" id="profile-level-stat" hidden><span>Level</span><strong id="profile-level">-</strong></article>
+        </div>
+
+        <section class="settings-card" aria-labelledby="profile-achievements-title">
+          <div class="collapse-heading">
+            <h3 id="profile-achievements-title">Achievements</h3>
+            <button class="text-button" id="profile-achievements-toggle" data-collapse-toggle="achievements" type="button" aria-expanded="true" aria-controls="profile-achievements">Hide</button>
+          </div>
+          <div id="profile-achievements">
+            <p class="empty-state">Loading achievements...</p>
+          </div>
+        </section>
+
+        <section class="settings-card" aria-labelledby="profile-attendance-title">
+          <div class="collapse-heading">
+            <h3 id="profile-attendance-title">Sessions you have attended</h3>
+            <span class="section-note" id="profile-attendance-count"></span>
+          </div>
+          <div id="profile-attendance"><p class="empty-state">Loading your attendance history...</p></div>
+        </section>
+      </section>
+
+      <section class="sessions-panel" id="sessions-panel" hidden aria-labelledby="sessions-title">
+        <div class="sessions-heading">
+          <div>
+            <div class="eyebrow accent">WORKSPACE / SESSIONS</div>
+            <h2 id="sessions-title">Coding sessions</h2>
+            <p>Upcoming sessions, past activity and your attendance.</p>
+          </div>
+          <div class="sessions-heading-actions">
+            <label class="session-search-label" for="session-search">Find a session</label>
+            <input id="session-search" type="search" maxlength="100" placeholder="Title, description or location" autocomplete="off">
+            <button class="secondary-button" id="sessions-refresh" type="button">Refresh</button>
+          </div>
+        </div>
+        <p id="sessions-message" class="panel-message" role="status" aria-live="polite">Loading sessions...</p>
+        <p id="session-search-empty" class="empty-state" hidden>No session matches that. Clear the box to see them all again.</p>
+
+        <section class="session-edit-panel" id="session-edit-panel" hidden aria-labelledby="session-edit-title">
+          <div class="session-edit-heading">
+            <h3 id="session-edit-title">Edit session</h3>
+            <span class="edit-state" id="session-edit-state" role="status" aria-live="polite"></span>
+            <button class="secondary-button" id="session-edit-close" type="button">Close</button>
+          </div>
+          <p class="settings-help">Changes are saved the moment you change something. There is no save button.</p>
+          <form id="session-edit-form" class="session-form" novalidate>
+            <label for="edit-title">Title<input id="edit-title" name="title" maxlength="120" required></label>
+            <label for="edit-description">Description<textarea id="edit-description" name="description" maxlength="4000" rows="3"></textarea></label>
+            <div class="session-form-row">
+              <label for="edit-starts">Starts<input id="edit-starts" name="startsAt" type="datetime-local" required></label>
+              <label for="edit-ends">Ends (optional)<input id="edit-ends" name="endsAt" type="datetime-local"></label>
+            </div>
+            <label for="edit-location">Location<input id="edit-location" name="location" maxlength="200"></label>
+            <label for="edit-status">Status
+              <select id="edit-status" name="status">
+                <option value="scheduled">Scheduled</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </label>
+          </form>
+        </section>
+
+        <section class="session-create-panel" id="session-create-panel" hidden aria-labelledby="create-session-title">
+          <h3 id="create-session-title">Create a session</h3>
+          <form id="session-create-form" class="session-form">
+            <label for="session-title-input">Title<input id="session-title-input" name="title" maxlength="120" required></label>
+            <label for="session-description-input">Description<textarea id="session-description-input" name="description" maxlength="4000" rows="3"></textarea></label>
+            <div class="session-form-row">
+              <label for="session-start-input">Starts<input id="session-start-input" name="startsAt" type="datetime-local" required></label>
+              <label for="session-end-input">Ends (optional)<input id="session-end-input" name="endsAt" type="datetime-local"></label>
+            </div>
+            <label for="session-location-input">Location<input id="session-location-input" name="location" maxlength="200"></label>
+            <button class="primary-button" type="submit">Create session</button>
+          </form>
+        </section>
+
+        <div class="sessions-list" id="sessions-list"></div>
+
+        <section class="session-attendance-panel" id="session-attendance-panel" hidden aria-labelledby="session-attendance-title">
+          <div class="session-attendance-heading">
+            <h3 id="session-attendance-title">Attendance</h3>
+            <button class="secondary-button" id="session-attendance-close" type="button">Close</button>
+          </div>
+          <div id="session-attendance-content"></div>
+        </section>
+      </section>
+
+      <section class="settings-panel" id="settings-panel" hidden aria-labelledby="settings-title">
+        <div class="settings-heading">
+          <div>
+            <div class="eyebrow accent">ACCOUNT / PREFERENCES</div>
+            <h2 id="settings-title">Settings</h2>
+            <p>Manage your profile, how the portal looks, and your account.</p>
+          </div>
+        </div>
+
+        <p class="settings-message" id="settings-message" role="status" aria-live="polite"></p>
+
+        <section class="settings-card" aria-labelledby="profile-settings-title">
+          <h3 id="profile-settings-title">Profile</h3>
+          <form id="profile-form" novalidate>
+            <div class="profile-settings-row">
+              <div class="profile-avatar-column">
+                <span class="account-avatar settings-avatar" id="settings-avatar" aria-hidden="true">U</span>
+                <button class="text-button" id="remove-picture" type="button" hidden>Remove picture</button>
+              </div>
+              <div class="profile-settings-fields">
+                <div class="settings-form">
+                  <label for="display-name-input">Display name</label>
+                  <div class="settings-inline">
+                    <input id="display-name-input" name="displayName" maxlength="80" autocomplete="nickname" required aria-describedby="display-name-help">
+                    <button class="primary-button" type="submit" id="save-changes">Save changes</button>
+                  </div>
+                  <p class="settings-help" id="display-name-help">Up to 80 characters. This is the name other members see.</p>
+                </div>
+
+                <div class="settings-form">
+                  <span class="field-label" id="picture-label">Profile picture</span>
+                  <div class="settings-inline">
+                    <input id="profile-picture-input" type="file" name="picture" accept="image/png,image/jpeg,image/webp,image/gif" aria-labelledby="picture-label" aria-describedby="picture-help">
+                  </div>
+                  <p class="settings-help" id="picture-help">
+                    PNG, JPEG, WebP or GIF, up to 350 KB. Nothing is uploaded until you choose Save changes.
+                  </p>
+                  <p class="settings-file" id="picture-file" hidden></p>
+                  <button class="text-button" id="cancel-picture" type="button" hidden>Cancel picture selection</button>
+                </div>
+              </div>
+            </div>
+          </form>
+        </section>
+
+        <section class="settings-card" aria-labelledby="appearance-title">
+          <h3 id="appearance-title">Appearance</h3>
+          <p>Choose how the portal looks in this browser. Your choice is remembered here and nowhere else.</p>
+          <div class="settings-theme-row" role="radiogroup" aria-labelledby="theme-label">
+            <span class="field-label" id="theme-label">Colour theme</span>
+            <div class="theme-options">
+              <label class="theme-option">
+                <input type="radio" name="theme" value="dark">
+                <span>Dark</span>
+              </label>
+              <label class="theme-option">
+                <input type="radio" name="theme" value="light">
+                <span>Light</span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-card admin-preferences" id="admin-preferences" hidden aria-labelledby="admin-view-title">
+          <h3 id="admin-view-title">Administrator view</h3>
+          <p>Preview the portal exactly as a regular member sees it. This is a display preview only: your role, permissions and every administrator endpoint stay unchanged.</p>
+          <button id="preview-toggle" class="secondary-button" type="button">Switch to user view</button>
+        </section>
+
+        <section class="settings-card danger-zone" aria-labelledby="delete-account-title">
+          <h3 id="delete-account-title">Delete account</h3>
+          <p>
+            Deleting your account is permanent. Your sign-in identity, profile picture and account data are
+            removed. Sessions you created stay on the portal with your name removed, and administrative history
+            is kept without identifying you.
+          </p>
+          <button class="danger-button" id="open-delete-account" type="button">Delete account...</button>
+        </section>
+      </section>
+
+      <section class="admin-panel" id="admin-panel" hidden aria-labelledby="admin-title">
+        <div class="admin-heading">
+          <div>
+            <div class="eyebrow accent">ADMINISTRATION</div>
+            <h2 id="admin-title">Admin panel</h2>
+            <p>Manage accounts and review administrator activity.</p>
+          </div>
+          <button class="secondary-button" id="admin-refresh" type="button">Refresh</button>
+        </div>
+        <p class="panel-message" id="admin-message" role="status" aria-live="polite"></p>
+        <div class="admin-stats" id="admin-stats">
+          <article class="admin-stat"><span>Total accounts</span><strong id="stat-total">-</strong></article>
+          <article class="admin-stat"><span>Active</span><strong id="stat-active">-</strong></article>
+          <article class="admin-stat"><span>Suspended</span><strong id="stat-suspended">-</strong></article>
+          <article class="admin-stat"><span>Active admins</span><strong id="stat-admins">-</strong></article>
+        </div>
+        <section class="admin-section" aria-labelledby="admin-users-title">
+          <div class="admin-section-heading collapse-heading">
+            <h3 id="admin-users-title">User accounts</h3>
+            <div class="collapse-heading-actions">
+              <span>MAX 200 RESULTS</span>
+              <button class="text-button" data-collapse-toggle="users" type="button" aria-expanded="true" aria-controls="admin-users-section">Hide</button>
+            </div>
+          </div>
+          <div id="admin-users-section">
+            <label class="admin-search-label" for="admin-search">Search accounts</label>
+            <div class="admin-search-row">
+              <input id="admin-search" type="search" maxlength="100" placeholder="Name, email or account ID">
+              <button class="secondary-button" id="admin-search-button" type="button">Search</button>
+            </div>
+            <div class="admin-table-wrap">
+              <table class="admin-table" id="admin-users-table">
+                <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+                <tbody id="admin-users"><tr><td colspan="4">Open the admin panel to load accounts.</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section class="admin-section" aria-labelledby="admin-achievements-title">
+          <div class="admin-section-heading collapse-heading">
+            <h3 id="admin-achievements-title">Achievements</h3>
+            <div class="collapse-heading-actions">
+              <span>BADGES AND VISIBILITY</span>
+              <button class="text-button" data-collapse-toggle="achievements-admin" type="button" aria-expanded="true" aria-controls="admin-achievements-section">Hide</button>
+            </div>
+          </div>
+          <div id="admin-achievements-section">
+            <p class="admin-message" id="achievements-message" role="status" aria-live="polite"></p>
+            <form id="achievement-create-form" class="group-create-form">
+              <label for="achievement-name-input">Name<input id="achievement-name-input" name="name" maxlength="80" required placeholder="First session"></label>
+              <label for="achievement-picture-input">Picture<input id="achievement-picture-input" name="picture" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label>
+              <div class="picture-preview-slot" id="achievement-picture-preview"></div>
+              <label for="achievement-description-input">Description<input id="achievement-description-input" name="description" maxlength="500" placeholder="Optional"></label>
+              <button class="primary-button" type="submit">Create</button>
+            </form>
+            <div class="achievements-list" id="achievements-list"><p class="empty-state">Loading achievements...</p></div>
+          </div>
+        </section>
+
+        <section class="admin-section" aria-labelledby="admin-groups-title">
+          <div class="admin-section-heading collapse-heading">
+            <h3 id="admin-groups-title">Groups</h3>
+            <div class="collapse-heading-actions">
+              <span>MEMBER MANAGEMENT</span>
+              <button class="text-button" data-collapse-toggle="groups" type="button" aria-expanded="true" aria-controls="admin-groups-section">Hide</button>
+            </div>
+          </div>
+          <div id="admin-groups-section">
+            <p class="admin-message" id="groups-message" role="status" aria-live="polite"></p>
+            <form id="group-create-form" class="group-create-form">
+            <label for="group-name-input">New group name<input id="group-name-input" name="name" maxlength="80" required placeholder="Helm crew"></label>
+            <label for="group-description-input">Description<input id="group-description-input" name="description" maxlength="500" placeholder="Optional"></label>
+            <button class="primary-button" type="submit">Create group</button>
+            </form>
+            <div class="groups-list" id="groups-list"><p class="empty-state">Loading groups...</p></div>
+          </div>
+        </section>
+
+        <section class="admin-section" aria-labelledby="admin-audit-title">
+          <div class="admin-section-heading collapse-heading">
+            <h3 id="admin-audit-title">Audit log</h3>
+            <div class="collapse-heading-actions">
+              <span>LATEST 50 EVENTS</span>
+              <button class="text-button" data-collapse-toggle="audit" id="admin-audit-toggle" type="button" aria-expanded="true" aria-controls="admin-audit">Hide</button>
+            </div>
+          </div>
+          <div class="admin-audit-list" id="admin-audit"><p>Audit events will appear here.</p></div>
+        </section>
+      </section>
+
+      <footer class="footer">
+        <span>CODING SESSIONS PORTAL</span>
+        <span>SECURE BY DESIGN - BUILT IN STAGES - <a href="/privacy.html">PRIVACY POLICY</a> - <a href="#" id="cookie-reopen">COOKIE CHOICES</a></span>
+      </footer>
+    </main>
+  </div>
+
+  <div class="cookie-banner" id="cookie-banner" role="dialog" aria-labelledby="cookie-title" aria-describedby="cookie-body" hidden>
+    <div class="cookie-copy">
+      <h2 id="cookie-title">Cookies on this portal</h2>
+      <p id="cookie-body">
+        This portal uses <strong>four cookies, all essential</strong> to signing in safely: one keeps you
+        signed in, one proves a change came from this site rather than another, and two are short-lived
+        sign-in helpers. There is <strong>no advertising, no analytics and no tracking</strong> of any kind.
+        Your choices are remembered in this browser only.
+      </p>
+      <a class="cookie-link" href="/privacy.html" target="_blank" rel="noopener">Read the full privacy policy</a>
+    </div>
+    <div class="cookie-actions">
+      <button class="secondary-button" id="cookie-essential" type="button">Essential only</button>
+      <button class="primary-button" id="cookie-accept" type="button">Accept</button>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="delete-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title" aria-describedby="delete-modal-body">
+      <h2 id="delete-modal-title">Delete your account?</h2>
+      <div id="delete-modal-body">
+        <p>This permanently removes your account, your sign-in identity and your stored profile picture. It cannot be undone.</p>
+        <p>Sessions you created remain, with your name removed. Administrative history is kept without identifying you.</p>
+        <form id="delete-account-form" novalidate>
+          <label for="delete-confirmation">Type <strong>DELETE</strong> to confirm</label>
+          <input id="delete-confirmation" name="confirmation" autocomplete="off" spellcheck="false" placeholder="DELETE" aria-describedby="delete-modal-warning">
+          <p class="settings-help" id="delete-modal-warning">The button below stays disabled until the word matches exactly.</p>
+          <div class="modal-actions">
+            <button class="secondary-button" id="delete-cancel" type="button">Keep my account</button>
+            <button class="danger-button" id="delete-confirm" type="submit" form="delete-account-form" disabled>Permanently delete account</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+<script>
+window.addEventListener("load", function () {
+  setTimeout(function () {
+    var out = document.createElement("pre");
+    out.id = "smoke-result";
+    var probe = {
+      errors: window.__smoke.errors,
+      warnings: window.__smoke.logs,
+      // Did the module actually finish wiring itself up?
+      title: document.title,
+      hasSessionsList: Boolean(document.getElementById("sessions-list")),
+      sessionsListEmpty: (document.getElementById("sessions-list") || {}).childElementCount,
+      themeWorks: typeof document.documentElement.dataset.theme === "string",
+      privacyLink: Boolean(document.querySelector('a[href="/privacy.html"]')),
+      cookieBannerPresent: Boolean(document.getElementById("cookie-banner")),
+      achievementCreateForm: Boolean(document.getElementById("achievement-create-form")),
+      // The QOL pass added five new element ids that app.js resolves at load.
+      // A null in any of them would silently disable a feature rather than throw,
+      // so they are probed explicitly.
+      sessionSearch: Boolean(document.getElementById("session-search")),
+      sessionSearchEmpty: Boolean(document.getElementById("session-search-empty")),
+      sessionsNavCount: Boolean(document.getElementById("sessions-nav-count")),
+      buildStatus: (function () {
+        var node = document.getElementById("build-status");
+        return Boolean(node && node.querySelector("span:last-child"));
+      })(),
+      buildStatusText: (function () {
+        var node = document.getElementById("build-status");
+        var label = node && node.querySelector("span:last-child");
+        return label ? label.textContent : null;
+      })(),
+      nextSessionCard: Boolean(document.getElementById("next-session-card")),
+      nextSessionCardHidden: (document.getElementById("next-session-card") || {}).hidden,
+      noAchievementsSoon: document.documentElement.innerHTML.indexOf("Achievements <small>SOON</small>") === -1,
+      noDevBuild: document.documentElement.innerHTML.indexOf("DEVELOPMENT BUILD") === -1
+    };
+    out.textContent = "SMOKE_JSON_START" + JSON.stringify(probe) + "SMOKE_JSON_END";
+    document.body.appendChild(out);
+  }, 900);
+});
+</script>
+</body>
+</html>
