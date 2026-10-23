@@ -2572,8 +2572,15 @@ function renderAchievements(achievements, allUsers, allGroups) {
     const iconField = document.createElement("input");
     iconField.value = item.icon || "";
     iconField.maxLength = 8;
-    iconField.placeholder = "Optional, up to 8 characters";
-    iconField.setAttribute("aria-label", "Icon for " + item.name);
+    iconField.placeholder = "e.g. * or A";
+    iconField.setAttribute("aria-label", "Icon text for " + item.name);
+
+    // "Icon" sitting next to "Picture" reads like a second image field, and it
+    // is not: it is the one text symbol drawn in the badge when no picture has
+    // been uploaded. Spelling that out is cheaper than every admin guessing.
+    const iconNote = document.createElement("p");
+    iconNote.className = "settings-help";
+    iconNote.textContent = "A short text symbol, not an image. It is shown in the badge when there is no picture, up to 8 plain characters. Use Picture below to upload an image.";
 
     const editorActions = document.createElement("div");
     editorActions.className = "achievement-editor-actions";
@@ -2585,7 +2592,8 @@ function renderAchievements(achievements, allUsers, allGroups) {
     editor.append(
       labelled("Name", nameField),
       labelled("Description", descriptionField),
-      labelled("Icon", iconField),
+      labelled("Icon (text)", iconField),
+      iconNote,
       editorActions
     );
 
@@ -2674,7 +2682,7 @@ function renderAchievements(achievements, allUsers, allGroups) {
         return;
       }
       if (wanted.icon.length > 8 || /[^\x20-\x7E]/.test(wanted.icon)) {
-        state.textContent = "Icon must be 8 plain characters or fewer.";
+        state.textContent = "The icon is a text symbol, not an image: 8 plain characters or fewer.";
         state.classList.add("error");
         iconField.focus();
         return;

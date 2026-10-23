@@ -3169,3 +3169,17 @@ test("an achievement with no picture shows its stored icon, not the initial", ()
   assert.equal(achievementImage({ name: "First session", icon: null }).textContent, "F");
   assert.equal(achievementImage({ name: "First session", icon: "" }).textContent, "F");
 });
+
+test("the icon field says it is text, so it is not read as a second image field", () => {
+  const app = appSource();
+
+  // "Icon" next to "Picture" reads like another image upload. Ethan asked what
+  // "up to 8 characters for an image" meant, which is that misreading reaching
+  // a real person - the label and the note both have to say it is text.
+  assert.match(app, /labelled\("Icon \(text\)", iconField\)/,
+    "the field label must say it is text");
+  assert.match(app, /A short text symbol, not an image\./,
+    "the field needs a note saying it is not an image");
+  assert.match(app, /not an image: 8 plain characters or fewer/,
+    "the validation message must say the same thing");
+});
